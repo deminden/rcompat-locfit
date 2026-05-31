@@ -39,12 +39,12 @@ public API.
 The current implementation is validated against black-box R `locfit` fixtures.
 Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
 
-| Fixture set | Max relative error | Notes |
-| --- | ---: | --- |
-| Committed real DESeq2-derived subset | `1.11e-8` | Self-contained fixture checked by the default test suite. |
-| Ignored full real DESeq2 hard rows | `3.19e-9` | Uses local `/data/` tables, not committed. |
-| Ignored full real DESeq2 all rows | `3.19e-9` | Uses local compressed `/data/` table, not committed. |
-| Synthetic R `locfit` matrix | `1.02e-1` | Worst case is the known tiny weighted `five_weighted_points` regime. |
+| Fixture set | Max relative error |
+| --- | ---: |
+| Committed real DESeq2-derived subset | `1.11e-8` |
+| Ignored full real DESeq2 hard rows | `3.19e-9` |
+| Ignored full real DESeq2 all rows | `3.19e-9` |
+| Synthetic R `locfit` matrix | `1.02e-1` |
 
 The synthetic matrix intentionally includes edge cases that are outside the
 main DESeq2-sized path. The remaining large synthetic error is tracked as a
