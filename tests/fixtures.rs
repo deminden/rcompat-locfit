@@ -13,7 +13,6 @@ const REAL_DESEQ2_FULL_ALL_ROWS_PATH: &str = "data/local_dispersion_all_rows.tsv
 const MIN_DISP: f64 = 1e-8;
 const DEFAULT_SYNTHETIC_REL_TOLERANCE: f64 = 5e-8;
 const FEW_POINTS_REL_TOLERANCE: f64 = 5e-8;
-const FIVE_WEIGHTED_POINTS_REL_TOLERANCE: f64 = 1.1e-1;
 const FILTERED_MIN_DISP_REL_TOLERANCE: f64 = 5e-8;
 const REAL_DESEQ2_COMMITTED_REL_TOLERANCE: f64 = 5e-8;
 const FULL_REAL_HARD_ROWS_REL_TOLERANCE: f64 = 1.0e-8;
@@ -118,7 +117,6 @@ fn real_deseq2_committed_subset_is_present_and_compact() {
 }
 
 #[test]
-#[ignore = "synthetic R locfit parity includes known edge-case gaps; run explicitly after generating fixtures"]
 fn r_locfit_fixture_parity() {
     let cases = load_cases();
     if cases.is_empty() {
@@ -549,7 +547,6 @@ fn relative_error(actual: f64, expected: f64) -> f64 {
 fn synthetic_case_tolerance(case_name: &str) -> f64 {
     match case_name {
         "few_points" => FEW_POINTS_REL_TOLERANCE,
-        "five_weighted_points" => FIVE_WEIGHTED_POINTS_REL_TOLERANCE,
         "filtered_min_disp" => FILTERED_MIN_DISP_REL_TOLERANCE,
         _ => DEFAULT_SYNTHETIC_REL_TOLERANCE,
     }

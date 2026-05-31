@@ -13,7 +13,7 @@ Current status: validated for targeted DESeq2 local-dispersion compatibility
 work. The DESeq2 wrapper matches black-box R `locfit` very closely on the real
 DESeq2-derived fixtures used during development. Broader exact R `locfit`
 parity is still work in progress, especially around adaptive evaluation grids,
-ties, tiny weighted fits, and singular local designs.
+ties, and singular local designs.
 
 ## Scope
 
@@ -41,14 +41,14 @@ Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
 
 | Fixture set | Max relative error |
 | --- | ---: |
-| Committed real DESeq2-derived subset | `1.11e-8` |
+| Committed real DESeq2-derived subset | `1.10e-8` |
 | Ignored full real DESeq2 hard rows | `3.19e-9` |
 | Ignored full real DESeq2 all rows | `3.19e-9` |
-| Synthetic R `locfit` matrix | `1.02e-1` |
+| Synthetic R `locfit` matrix | `3.16e-8` |
 
 The synthetic matrix intentionally includes edge cases that are outside the
-main DESeq2-sized path. The remaining large synthetic error is tracked as a
-compatibility target rather than hidden by omitting the case.
+main DESeq2-sized path. It remains useful as a compatibility target for future
+changes even though the current committed cases are now close to the R oracle.
 
 ## Usage
 
@@ -84,11 +84,10 @@ local `/data/` debug tables with:
 Rscript fixtures/r/generate_real_deseq_subset_fixture.R
 ```
 
-The default `cargo test` run includes the committed real DESeq2-derived subset
-parity check and does not require R or generated fixtures. Synthetic fixture
-parity and full real-data diagnostics are ignored by default because they
-depend on optional/generated fixture data, local `/data/` tables, or broader
-exact R `locfit` behavior that is still being refined.
+The default `cargo test` run includes the committed synthetic fixture matrix
+and the committed real DESeq2-derived subset parity check. It does not require
+R. Full real-data diagnostics are ignored by default because they depend on
+local `/data/` tables.
 
 ## License
 

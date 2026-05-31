@@ -237,8 +237,16 @@ impl LocalFit {
             return None;
         }
 
-        let center =
-            self.points.iter().map(|point| point.x).sum::<f64>() / self.points.len() as f64;
+        let weight_sum = self.points.iter().map(|point| point.weight).sum::<f64>();
+        if weight_sum <= 0.0 {
+            return None;
+        }
+        let center = self
+            .points
+            .iter()
+            .map(|point| point.weight * point.x)
+            .sum::<f64>()
+            / weight_sum;
         let z: Vec<_> = self.points.iter().map(|point| point.x - center).collect();
         let y: Vec<_> = self.points.iter().map(|point| point.y).collect();
         let weights: Vec<_> = self.points.iter().map(|point| point.weight).collect();
@@ -469,45 +477,175 @@ fn rank_deficient_quadratic_compatibility_prediction(
         return None;
     }
 
-    let max_weight = weights.iter().copied().fold(0.0_f64, f64::max);
-    if max_weight <= 0.0 {
-        return None;
-    }
-
-    let mut active_z = Vec::with_capacity(2);
-    let mut active_y = Vec::with_capacity(2);
-    let mut active_weights = Vec::with_capacity(2);
+    let mut active_z = Vec::with_capacity(z.len());
+    let mut active_y = Vec::with_capacity(y.len());
+    let mut active_weights = Vec::with_capacity(weights.len());
     for ((&zi, &yi), &wi) in z.iter().zip(y).zip(weights) {
-        if wi > max_weight * 1e-12 {
+        if wi > 0.0 && wi.is_finite() && zi.is_finite() && yi.is_finite() {
             active_z.push(zi);
             active_y.push(yi);
             active_weights.push(wi);
         }
     }
-    if active_z.len() != 2 {
+    if active_z.is_empty() {
         return None;
     }
 
     let coefficients =
-        wls::weighted_polynomial_coefficients(&active_z, &active_y, &active_weights, 1).ok()?;
-    if let Some(zero_index) = active_z.iter().position(|value| value.abs() <= 1e-12) {
-        let other_index = 1 - zero_index;
-        let slope = (active_y[other_index] - active_y[zero_index]) / (2.0 * active_z[other_index]);
-        return Some((active_y[zero_index], slope));
-    }
+        r_style_quadratic_pseudoinverse_coefficients(&active_z, &active_y, &active_weights)?;
+    Some((coefficients[0], coefficients[1]))
+}
 
-    let weight_sum = active_weights[0] + active_weights[1];
+fn r_style_quadratic_pseudoinverse_coefficients(
+    z: &[f64],
+    y: &[f64],
+    weights: &[f64],
+) -> Option<[f64; 3]> {
+    let weight_sum = weights.iter().sum::<f64>();
     if weight_sum <= 0.0 {
         return None;
     }
 
-    // In black-box R locfit probes, two-point rank-deficient quadratic cells
-    // keep the local linear slope but shift the reported value by half of the
-    // positive-weight center. This matters for tiny filtered DESeq2 fits.
-    let weighted_center =
-        (active_weights[0] * active_z[0] + active_weights[1] * active_z[1]) / weight_sum;
-    let value = coefficients[0] + 0.5 * coefficients[1] * weighted_center;
-    Some((value, coefficients[1]))
+    let mut coefficients = [
+        y.iter().zip(weights).map(|(&yi, &wi)| wi * yi).sum::<f64>() / weight_sum,
+        0.0,
+        0.0,
+    ];
+
+    let mut hessian = [[0.0_f64; 3]; 3];
+    let mut score = [0.0_f64; 3];
+
+    for ((&zi, &yi), &wi) in z.iter().zip(y).zip(weights) {
+        let basis = [1.0, zi, 0.5 * zi * zi];
+        let residual = yi
+            - coefficients[0] * basis[0]
+            - coefficients[1] * basis[1]
+            - coefficients[2] * basis[2];
+        for row in [0, 1, 2] {
+            score[row] += wi * basis[row] * residual;
+            for col in 0..3 {
+                hessian[row][col] += wi * basis[row] * basis[col];
+            }
+        }
+    }
+
+    let delta = scaled_symmetric_pseudoinverse_solve_3(hessian, score)?;
+    for index in 0..3 {
+        coefficients[index] += delta[index];
+    }
+    Some(coefficients)
+}
+
+fn scaled_symmetric_pseudoinverse_solve_3(
+    matrix: [[f64; 3]; 3],
+    rhs: [f64; 3],
+) -> Option<[f64; 3]> {
+    let mut scale = [0.0_f64; 3];
+    for index in 0..3 {
+        if matrix[index][index] > 0.0 {
+            scale[index] = 1.0 / matrix[index][index].sqrt();
+        }
+    }
+    if scale.iter().all(|value| *value == 0.0) {
+        return None;
+    }
+
+    let mut scaled_matrix = [[0.0_f64; 3]; 3];
+    let mut scaled_rhs = [0.0_f64; 3];
+    for row in 0..3 {
+        scaled_rhs[row] = rhs[row] * scale[row];
+        for col in 0..3 {
+            scaled_matrix[row][col] = matrix[row][col] * scale[row] * scale[col];
+        }
+    }
+
+    let (eigenvalues, eigenvectors) = symmetric_eigen_decomposition_3(scaled_matrix);
+    let max_eigenvalue = eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+    if max_eigenvalue <= 0.0 {
+        return Some([0.0; 3]);
+    }
+
+    let tolerance = 1e-8 * max_eigenvalue;
+    let mut scaled_solution = [0.0_f64; 3];
+    for eigen_index in 0..3 {
+        let eigenvalue = eigenvalues[eigen_index];
+        if eigenvalue <= tolerance {
+            continue;
+        }
+        let projected_rhs = (0..3)
+            .map(|row| eigenvectors[row][eigen_index] * scaled_rhs[row])
+            .sum::<f64>();
+        for row in [0, 1, 2] {
+            scaled_solution[row] += eigenvectors[row][eigen_index] * projected_rhs / eigenvalue;
+        }
+    }
+
+    let mut solution = [0.0_f64; 3];
+    for index in 0..3 {
+        solution[index] = scaled_solution[index] * scale[index];
+    }
+    Some(solution)
+}
+
+fn symmetric_eigen_decomposition_3(mut matrix: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    let mut vectors = [[0.0_f64; 3]; 3];
+    for (index, row) in vectors.iter_mut().enumerate() {
+        row[index] = 1.0;
+    }
+
+    for _ in 0..20 {
+        let mut pivot = (0, 1);
+        let mut pivot_abs = matrix[0][1].abs();
+        for (row, col) in [(0, 2), (1, 2)] {
+            let candidate = matrix[row][col].abs();
+            if candidate > pivot_abs {
+                pivot = (row, col);
+                pivot_abs = candidate;
+            }
+        }
+
+        let (p, q) = pivot;
+        if pivot_abs * pivot_abs <= 1e-15 * (matrix[p][p] * matrix[q][q]).abs() {
+            break;
+        }
+
+        let tau = (matrix[q][q] - matrix[p][p]) / (2.0 * matrix[p][q]);
+        let t = if tau >= 0.0 {
+            1.0 / (tau + (1.0 + tau * tau).sqrt())
+        } else {
+            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+        };
+        let cosine = 1.0 / (1.0 + t * t).sqrt();
+        let sine = t * cosine;
+
+        for row in [0, 1, 2] {
+            if row != p && row != q {
+                let arp = matrix[row][p];
+                let arq = matrix[row][q];
+                matrix[row][p] = cosine * arp - sine * arq;
+                matrix[p][row] = matrix[row][p];
+                matrix[row][q] = sine * arp + cosine * arq;
+                matrix[q][row] = matrix[row][q];
+            }
+        }
+
+        let app = matrix[p][p];
+        let aqq = matrix[q][q];
+        let apq = matrix[p][q];
+        matrix[p][p] = cosine * cosine * app - 2.0 * sine * cosine * apq + sine * sine * aqq;
+        matrix[q][q] = sine * sine * app + 2.0 * sine * cosine * apq + cosine * cosine * aqq;
+        matrix[p][q] = 0.0;
+        matrix[q][p] = 0.0;
+
+        for row in &mut vectors {
+            let vip = row[p];
+            let viq = row[q];
+            row[p] = cosine * vip - sine * viq;
+            row[q] = sine * vip + cosine * viq;
+        }
+    }
+
+    ([matrix[0][0], matrix[1][1], matrix[2][2]], vectors)
 }
 
 fn cubic_hermite(x: f64, left: EvaluationPoint, right: EvaluationPoint) -> f64 {
@@ -535,7 +673,9 @@ fn cubic_hermite(x: f64, left: EvaluationPoint, right: EvaluationPoint) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{locfit_like_evaluation_xs, Point};
+    use super::{
+        locfit_like_evaluation_xs, rank_deficient_quadratic_compatibility_prediction, Point,
+    };
 
     fn points(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<Point> {
         (0..n)
@@ -556,6 +696,13 @@ mod tests {
             .collect()
     }
 
+    fn assert_close(actual: f64, expected: f64, tolerance: f64) {
+        assert!(
+            (actual - expected).abs() <= tolerance,
+            "actual={actual}, expected={expected}, tolerance={tolerance}"
+        );
+    }
+
     fn fractions(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<f64> {
         let points = points(n, varied_weights, repeated_x);
         let min_x = points
@@ -571,6 +718,19 @@ mod tests {
             .into_iter()
             .map(|x| (x - min_x) / (max_x - min_x))
             .collect()
+    }
+
+    #[test]
+    fn rank_deficient_quadratic_uses_scaled_pseudoinverse() {
+        let z = [0.06681776879791335, -0.6263294117620319];
+        let y = [0.41_f64.ln(), 0.62_f64.ln()];
+        let weights = [1.9988694580937982, 0.6028783879042434];
+
+        let (value, slope) =
+            rank_deficient_quadratic_compatibility_prediction(&z, &y, &weights).unwrap();
+
+        assert_close(value, -0.869_950_262_166_704, 1e-10);
+        assert_close(slope, -0.353_071_400_771_606_3, 1e-10);
     }
 
     #[test]
