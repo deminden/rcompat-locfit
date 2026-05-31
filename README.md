@@ -41,10 +41,10 @@ Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
 
 | Fixture set | Max relative error |
 | --- | ---: |
-| Committed real DESeq2-derived subset | `1.10e-8` |
-| Ignored full real DESeq2 hard rows | `3.19e-9` |
-| Ignored full real DESeq2 all rows | `3.19e-9` |
-| Synthetic R `locfit` matrix | `3.16e-8` |
+| Committed real DESeq2-derived subset | `5.17e-11` |
+| Ignored full real DESeq2 hard rows | `1.59e-12` |
+| Ignored full real DESeq2 all rows | `1.78e-12` |
+| Synthetic R `locfit` matrix | `6.51e-10` |
 
 The synthetic matrix intentionally includes edge cases that are outside the
 main DESeq2-sized path. It remains useful as a compatibility target for future

@@ -11,12 +11,12 @@ const REAL_DESEQ2_FULL_FIT_POINTS_PATH: &str = "data/local_dispersion_fit_points
 const REAL_DESEQ2_FULL_HARD_ROWS_PATH: &str = "data/local_dispersion_ranked_hard_rows.tsv";
 const REAL_DESEQ2_FULL_ALL_ROWS_PATH: &str = "data/local_dispersion_all_rows.tsv.gz";
 const MIN_DISP: f64 = 1e-8;
-const DEFAULT_SYNTHETIC_REL_TOLERANCE: f64 = 5e-8;
-const FEW_POINTS_REL_TOLERANCE: f64 = 5e-8;
-const FILTERED_MIN_DISP_REL_TOLERANCE: f64 = 5e-8;
-const REAL_DESEQ2_COMMITTED_REL_TOLERANCE: f64 = 5e-8;
-const FULL_REAL_HARD_ROWS_REL_TOLERANCE: f64 = 1.0e-8;
-const FULL_REAL_ALL_ROWS_REL_TOLERANCE: f64 = 1.0e-8;
+const DEFAULT_SYNTHETIC_REL_TOLERANCE: f64 = 2e-9;
+const FEW_POINTS_REL_TOLERANCE: f64 = 2e-9;
+const FILTERED_MIN_DISP_REL_TOLERANCE: f64 = 2e-9;
+const REAL_DESEQ2_COMMITTED_REL_TOLERANCE: f64 = 1e-9;
+const FULL_REAL_HARD_ROWS_REL_TOLERANCE: f64 = 1e-10;
+const FULL_REAL_ALL_ROWS_REL_TOLERANCE: f64 = 1e-10;
 
 #[derive(Debug, Default)]
 struct Case {

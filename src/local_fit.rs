@@ -250,8 +250,8 @@ impl LocalFit {
         let z: Vec<_> = self.points.iter().map(|point| point.x - center).collect();
         let y: Vec<_> = self.points.iter().map(|point| point.y).collect();
         let weights: Vec<_> = self.points.iter().map(|point| point.weight).collect();
-        let coefficients = wls::weighted_polynomial_coefficients(&z, &y, &weights, 2).ok()?;
-        Some(2.0 * coefficients[2])
+        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights)?;
+        Some(coefficients[2])
     }
 
     fn predict_polynomial_with_downgrade(
@@ -313,27 +313,21 @@ impl LocalFit {
             }
         }
 
-        if weights.len() < degree + 1 {
-            if degree == 2 && self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
+        if degree == 2 && self.config.prediction_method == PredictionMethod::LocfitHermiteApprox {
+            if let Some(coefficients) =
+                r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights)
             {
-                if let Some(prediction) =
-                    rank_deficient_quadratic_compatibility_prediction(&z, &y, &weights)
-                {
-                    return Ok(prediction);
-                }
+                return Ok((coefficients[0], coefficients[1]));
             }
+            return Err(LocfitError::SingularFit);
+        }
+
+        if weights.len() < degree + 1 {
             return Err(LocfitError::SingularFit);
         }
 
         match wls::weighted_polynomial_coefficients(&z, &y, &weights, degree) {
             Ok(coefficients) => Ok((coefficients[0], coefficients[1])),
-            Err(LocfitError::SingularFit)
-                if degree == 2
-                    && self.config.prediction_method == PredictionMethod::LocfitHermiteApprox =>
-            {
-                rank_deficient_quadratic_compatibility_prediction(&z, &y, &weights)
-                    .ok_or(LocfitError::SingularFit)
-            }
             Err(error) => Err(error),
         }
     }
@@ -468,11 +462,11 @@ fn quadratic_boundary_extrapolation(
     boundary.value + boundary.slope * dx + 0.5 * boundary_curvature * dx * dx
 }
 
-fn rank_deficient_quadratic_compatibility_prediction(
+fn r_style_quadratic_pseudoinverse_coefficients(
     z: &[f64],
     y: &[f64],
     weights: &[f64],
-) -> Option<(f64, f64)> {
+) -> Option<[f64; 3]> {
     if z.len() != y.len() || z.len() != weights.len() {
         return None;
     }
@@ -491,23 +485,20 @@ fn rank_deficient_quadratic_compatibility_prediction(
         return None;
     }
 
-    let coefficients =
-        r_style_quadratic_pseudoinverse_coefficients(&active_z, &active_y, &active_weights)?;
-    Some((coefficients[0], coefficients[1]))
-}
-
-fn r_style_quadratic_pseudoinverse_coefficients(
-    z: &[f64],
-    y: &[f64],
-    weights: &[f64],
-) -> Option<[f64; 3]> {
+    let z = active_z;
+    let y = active_y;
+    let weights = active_weights;
     let weight_sum = weights.iter().sum::<f64>();
     if weight_sum <= 0.0 {
         return None;
     }
 
     let mut coefficients = [
-        y.iter().zip(weights).map(|(&yi, &wi)| wi * yi).sum::<f64>() / weight_sum,
+        y.iter()
+            .zip(&weights)
+            .map(|(&yi, &wi)| wi * yi)
+            .sum::<f64>()
+            / weight_sum,
         0.0,
         0.0,
     ];
@@ -515,7 +506,7 @@ fn r_style_quadratic_pseudoinverse_coefficients(
     let mut hessian = [[0.0_f64; 3]; 3];
     let mut score = [0.0_f64; 3];
 
-    for ((&zi, &yi), &wi) in z.iter().zip(y).zip(weights) {
+    for ((&zi, &yi), &wi) in z.iter().zip(&y).zip(&weights) {
         let basis = [1.0, zi, 0.5 * zi * zi];
         let residual = yi
             - coefficients[0] * basis[0]
@@ -588,60 +579,54 @@ fn scaled_symmetric_pseudoinverse_solve_3(
 }
 
 fn symmetric_eigen_decomposition_3(mut matrix: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+    // Fixed row/column Jacobi sweeps keep repeated-point cells aligned with
+    // locfit's scaled normal-equation solve, where tiny rotation-order
+    // differences are visible in parity fixtures.
     let mut vectors = [[0.0_f64; 3]; 3];
     for (index, row) in vectors.iter_mut().enumerate() {
         row[index] = 1.0;
     }
 
     for _ in 0..20 {
-        let mut pivot = (0, 1);
-        let mut pivot_abs = matrix[0][1].abs();
-        for (row, col) in [(0, 2), (1, 2)] {
-            let candidate = matrix[row][col].abs();
-            if candidate > pivot_abs {
-                pivot = (row, col);
-                pivot_abs = candidate;
+        let mut moved = false;
+        for (p, q) in [(0, 1), (0, 2), (1, 2)] {
+            if matrix[p][q] * matrix[p][q] <= 1e-15 * (matrix[p][p] * matrix[q][q]).abs() {
+                continue;
             }
+
+            let mut cosine = (matrix[q][q] - matrix[p][p]) / 2.0;
+            let mut sine = -matrix[p][q];
+            let radius = (cosine * cosine + sine * sine).sqrt();
+            cosine /= radius;
+            sine = ((1.0 - cosine) / 2.0).sqrt() * if sine > 0.0 { 1.0 } else { -1.0 };
+            cosine = ((1.0 + cosine) / 2.0).sqrt();
+
+            for index in [0, 1, 2] {
+                let left = matrix[p][index];
+                let right = matrix[q][index];
+                matrix[p][index] = left * cosine + right * sine;
+                matrix[q][index] = right * cosine - left * sine;
+            }
+            for row in &mut matrix {
+                let left = row[p];
+                let right = row[q];
+                row[p] = left * cosine + right * sine;
+                row[q] = right * cosine - left * sine;
+            }
+            matrix[p][q] = 0.0;
+            matrix[q][p] = 0.0;
+
+            for row in &mut vectors {
+                let left = row[p];
+                let right = row[q];
+                row[p] = left * cosine + right * sine;
+                row[q] = right * cosine - left * sine;
+            }
+            moved = true;
         }
 
-        let (p, q) = pivot;
-        if pivot_abs * pivot_abs <= 1e-15 * (matrix[p][p] * matrix[q][q]).abs() {
+        if !moved {
             break;
-        }
-
-        let tau = (matrix[q][q] - matrix[p][p]) / (2.0 * matrix[p][q]);
-        let t = if tau >= 0.0 {
-            1.0 / (tau + (1.0 + tau * tau).sqrt())
-        } else {
-            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
-        };
-        let cosine = 1.0 / (1.0 + t * t).sqrt();
-        let sine = t * cosine;
-
-        for row in [0, 1, 2] {
-            if row != p && row != q {
-                let arp = matrix[row][p];
-                let arq = matrix[row][q];
-                matrix[row][p] = cosine * arp - sine * arq;
-                matrix[p][row] = matrix[row][p];
-                matrix[row][q] = sine * arp + cosine * arq;
-                matrix[q][row] = matrix[row][q];
-            }
-        }
-
-        let app = matrix[p][p];
-        let aqq = matrix[q][q];
-        let apq = matrix[p][q];
-        matrix[p][p] = cosine * cosine * app - 2.0 * sine * cosine * apq + sine * sine * aqq;
-        matrix[q][q] = sine * sine * app + 2.0 * sine * cosine * apq + cosine * cosine * aqq;
-        matrix[p][q] = 0.0;
-        matrix[q][p] = 0.0;
-
-        for row in &mut vectors {
-            let vip = row[p];
-            let viq = row[q];
-            row[p] = cosine * vip - sine * viq;
-            row[q] = sine * vip + cosine * viq;
         }
     }
 
@@ -673,9 +658,7 @@ fn cubic_hermite(x: f64, left: EvaluationPoint, right: EvaluationPoint) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        locfit_like_evaluation_xs, rank_deficient_quadratic_compatibility_prediction, Point,
-    };
+    use super::{locfit_like_evaluation_xs, r_style_quadratic_pseudoinverse_coefficients, Point};
 
     fn points(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<Point> {
         (0..n)
@@ -726,11 +709,40 @@ mod tests {
         let y = [0.41_f64.ln(), 0.62_f64.ln()];
         let weights = [1.9988694580937982, 0.6028783879042434];
 
-        let (value, slope) =
-            rank_deficient_quadratic_compatibility_prediction(&z, &y, &weights).unwrap();
+        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights).unwrap();
 
-        assert_close(value, -0.869_950_262_166_704, 1e-10);
-        assert_close(slope, -0.353_071_400_771_606_3, 1e-10);
+        assert_close(coefficients[0], -0.869_950_262_166_704, 1e-10);
+        assert_close(coefficients[1], -0.353_071_400_771_606_3, 1e-10);
+    }
+
+    #[test]
+    fn repeated_boundary_quadratic_uses_scaled_sweep_order() {
+        let z = [
+            0.0,
+            0.0,
+            std::f64::consts::LN_2,
+            std::f64::consts::LN_2,
+            2.0 * std::f64::consts::LN_2,
+        ];
+        let y = [
+            0.6_f64.ln(),
+            0.55_f64.ln(),
+            0.42_f64.ln(),
+            0.39_f64.ln(),
+            0.27_f64.ln(),
+        ];
+        let weights = [
+            1.0,
+            1.0,
+            1.785906619925824,
+            1.785906619925824,
+            1.3938932073362795,
+        ];
+
+        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights).unwrap();
+
+        assert_close(coefficients[0], -0.554_331_303_827_558_8, 1e-12);
+        assert_close(coefficients[1], -0.465_911_874_639_272_3, 1e-12);
     }
 
     #[test]

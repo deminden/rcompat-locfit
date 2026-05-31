@@ -1,6 +1,6 @@
 [package]
 name = "rcompat-locfit"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 license = "MIT"
 description = "Clean-room Rust implementation of selected R locfit-compatible local regression behavior"
