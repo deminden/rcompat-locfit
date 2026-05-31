@@ -1,21 +1,19 @@
 # rcompat-locfit
 
-`rcompat-locfit` is an early, fixture-driven Rust crate for selected
-R `locfit`-compatible one-dimensional local regression behavior. The first
-target is the narrow local dispersion trend path used by DESeq2-style
-workflows.
+`rcompat-locfit` is a fixture-driven Rust crate for selected R
+`locfit`-compatible one-dimensional local regression behavior. The first target
+is the local dispersion trend path used by DESeq2-style workflows.
 
 This is a clean-room Rust implementation. It is not a binding to R `locfit`,
 does not call R at runtime, and does not contain code copied or translated from
 R `locfit`, DESeq2, or other copyleft projects. R `locfit` is used only as a
 black-box oracle for generating numeric test fixtures.
 
-Current status: initial development version. The generic implementation can use
-direct local polynomial weighted least squares at each prediction point. The
-DESeq2 wrapper now uses an approximate R `locfit`-style Hermite interpolation
-path for larger fits, with global weighted-quadratic boundary extrapolation.
-Exact R `locfit` parity is still work in progress, especially around adaptive
-evaluation grids, ties, and singular local designs.
+Current status: validated for targeted DESeq2 local-dispersion compatibility
+work. The DESeq2 wrapper matches black-box R `locfit` very closely on the real
+DESeq2-derived fixtures used during development. Broader exact R `locfit`
+parity is still work in progress, especially around adaptive evaluation grids,
+ties, tiny weighted fits, and singular local designs.
 
 ## Scope
 
@@ -35,6 +33,22 @@ evaluation grids, ties, and singular local designs.
 
 This crate is not a full port of R `locfit` and does not attempt to clone its
 public API.
+
+## Parity
+
+The current implementation is validated against black-box R `locfit` fixtures.
+Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
+
+| Fixture set | Max relative error | Notes |
+| --- | ---: | --- |
+| Committed real DESeq2-derived subset | `1.11e-8` | Self-contained fixture checked by the default test suite. |
+| Ignored full real DESeq2 hard rows | `3.19e-9` | Uses local `/data/` tables, not committed. |
+| Ignored full real DESeq2 all rows | `3.19e-9` | Uses local compressed `/data/` table, not committed. |
+| Synthetic R `locfit` matrix | `1.02e-1` | Worst case is the known tiny weighted `five_weighted_points` regime. |
+
+The synthetic matrix intentionally includes edge cases that are outside the
+main DESeq2-sized path. The remaining large synthetic error is tracked as a
+compatibility target rather than hidden by omitting the case.
 
 ## Usage
 
@@ -70,9 +84,11 @@ local `/data/` debug tables with:
 Rscript fixtures/r/generate_real_deseq_subset_fixture.R
 ```
 
-The default `cargo test` run does not require generated fixtures. R parity tests
-are ignored initially because exact R `locfit` evaluation behavior is still
-being investigated.
+The default `cargo test` run includes the committed real DESeq2-derived subset
+parity check and does not require R or generated fixtures. Synthetic fixture
+parity and full real-data diagnostics are ignored by default because they
+depend on optional/generated fixture data, local `/data/` tables, or broader
+exact R `locfit` behavior that is still being refined.
 
 ## License
 

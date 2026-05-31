@@ -4,7 +4,8 @@
 //! This crate currently focuses on the one-dimensional local polynomial path
 //! needed for DESeq2-style local dispersion trend fitting. It does not bind to
 //! R, does not call R at runtime, and does not contain R `locfit` source code.
-//! Numeric parity with R `locfit` is fixture-driven and still in progress.
+//! The DESeq2-oriented path is fixture-validated against black-box R `locfit`;
+//! broader exact R `locfit` parity is still in progress.
 
 pub mod config;
 pub mod deseq2;

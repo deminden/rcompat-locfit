@@ -21,8 +21,8 @@ impl Deseq2LocalDispersionTrend {
     /// Fit a DESeq2-style local dispersion trend.
     ///
     /// If no dispersions pass the `min_disp * 10` filter, this crate returns a
-    /// constant trend at `min_disp`. This is an ergonomic Rust behavior for the
-    /// initial implementation rather than a claim of exact DESeq2 behavior.
+    /// constant trend at `min_disp`. This is a pragmatic Rust fallback for
+    /// all-filtered inputs rather than a claim of exact DESeq2 behavior.
     pub fn fit(means: &[f64], disps: &[f64], min_disp: f64) -> Result<Self, LocfitError> {
         if means.len() != disps.len() {
             return Err(LocfitError::LengthMismatch {

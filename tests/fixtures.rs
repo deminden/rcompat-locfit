@@ -15,7 +15,7 @@ const DEFAULT_SYNTHETIC_REL_TOLERANCE: f64 = 5e-8;
 const FEW_POINTS_REL_TOLERANCE: f64 = 5e-8;
 const FIVE_WEIGHTED_POINTS_REL_TOLERANCE: f64 = 1.1e-1;
 const FILTERED_MIN_DISP_REL_TOLERANCE: f64 = 5e-8;
-const REAL_DESEQ2_INITIAL_REL_TOLERANCE: f64 = 5e-8;
+const REAL_DESEQ2_COMMITTED_REL_TOLERANCE: f64 = 5e-8;
 const FULL_REAL_HARD_ROWS_REL_TOLERANCE: f64 = 1.0e-8;
 const FULL_REAL_ALL_ROWS_REL_TOLERANCE: f64 = 1.0e-8;
 
@@ -118,7 +118,7 @@ fn real_deseq2_committed_subset_is_present_and_compact() {
 }
 
 #[test]
-#[ignore = "R locfit parity is initial work in progress; run explicitly after generating fixtures"]
+#[ignore = "synthetic R locfit parity includes known edge-case gaps; run explicitly after generating fixtures"]
 fn r_locfit_fixture_parity() {
     let cases = load_cases();
     if cases.is_empty() {
@@ -161,7 +161,6 @@ fn r_locfit_fixture_parity() {
 }
 
 #[test]
-#[ignore = "real DESeq2 subset parity is approximate while exact locfit parity is refined"]
 fn real_deseq2_curated_subset_parity() {
     let cases = load_real_cases(REAL_DESEQ2_FIXTURE_PATH);
     let mut failures = Vec::new();
@@ -173,7 +172,7 @@ fn real_deseq2_curated_subset_parity() {
             let actual = trend.predict_one(prediction.mean).unwrap();
             let rel = relative_error(actual, prediction.expected);
             max_rel = max_rel.max(rel);
-            if rel > REAL_DESEQ2_INITIAL_REL_TOLERANCE {
+            if rel > REAL_DESEQ2_COMMITTED_REL_TOLERANCE {
                 failures.push(format!(
                     "{name}/{}: mean={} actual={} expected={} rel={}",
                     prediction.gene, prediction.mean, actual, prediction.expected, rel

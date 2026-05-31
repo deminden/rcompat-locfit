@@ -12,16 +12,18 @@ Generate fixtures from the repository root:
 Rscript fixtures/r/generate_locfit_fixtures.R
 ```
 
-Run ignored parity checks with:
+Run the full optional parity checks with:
 
 ```bash
 cargo test --test fixtures -- --ignored
 ```
 
-These parity checks are intentionally not part of the default test run yet,
-because exact R `locfit` parity is still under investigation.
-When the ignored local `/data/` tables are available, the ignored fixture test
-also runs full real-data diagnostics, including the compressed all-row table.
+The default `cargo test` run already checks the committed real DESeq2-derived
+subset. The synthetic matrix and full real-data diagnostics remain ignored by
+default because they cover optional/generated fixtures and local `/data/`
+tables. When those ignored local tables are available, the ignored fixture
+tests also run full real-data diagnostics, including the compressed all-row
+table.
 
 ## Real DESeq2-Derived Subset
 
