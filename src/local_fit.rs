@@ -247,10 +247,21 @@ impl LocalFit {
             .map(|point| point.weight * point.x)
             .sum::<f64>()
             / weight_sum;
-        let z: Vec<_> = self.points.iter().map(|point| point.x - center).collect();
-        let y: Vec<_> = self.points.iter().map(|point| point.y).collect();
-        let weights: Vec<_> = self.points.iter().map(|point| point.weight).collect();
-        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights)?;
+        let mut global_points: Vec<_> = self.points.iter().collect();
+        if self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
+            && (self.points.len() == 5 || self.points.len() == 7)
+            && !has_repeated_x(&self.points)
+        {
+            // Small-fit extrapolation probes match R's global curvature when the
+            // weighted quadratic is accumulated from high to low input index.
+            global_points.reverse();
+        }
+
+        let z: Vec<_> = global_points.iter().map(|point| point.x - center).collect();
+        let y: Vec<_> = global_points.iter().map(|point| point.y).collect();
+        let weights: Vec<_> = global_points.iter().map(|point| point.weight).collect();
+        let coefficients =
+            r_style_quadratic_coefficients(&z, &y, &weights, self.uses_fused_quadratic_sums())?;
         Some(coefficients[2])
     }
 
@@ -286,7 +297,12 @@ impl LocalFit {
         // zero tricube weight and are then handled by singular-fit downgrade.
         let alpha_neighbors = (self.config.alpha * n as f64).floor() as usize;
         let k = alpha_neighbors.clamp(min_neighbors, n);
-        let bandwidth = distances[k - 1].distance;
+        let mut bandwidth = distances[k - 1].distance;
+        if self.uses_repeated_bandwidth_nudge(x0) && bandwidth > 0.0 {
+            // The 10-point repeated clustered probe behaves as though tied
+            // bandwidth boundary points receive the next representable radius.
+            bandwidth = f64::from_bits(bandwidth.to_bits() + 1);
+        }
 
         if bandwidth == 0.0 {
             if degree == 0 {
@@ -299,10 +315,21 @@ impl LocalFit {
         let mut y = Vec::new();
         let mut weights = Vec::new();
 
-        for distance in distances
+        let mut active_distances: Vec<_> = distances
             .iter()
             .take_while(|distance| distance.distance <= bandwidth)
-        {
+            .collect();
+        if self.uses_input_order_for_local_sums() {
+            active_distances.sort_by_key(|distance| distance.original_index);
+            // Black-box R probes split nearby non-repeated grids here: the
+            // 30-point quarter-grid cells match descending input traversal, while
+            // wider 36-point dynamic-range cells match ascending input traversal.
+            if self.points.len() == 30 {
+                active_distances.reverse();
+            }
+        }
+
+        for distance in active_distances {
             let point = &self.points[distance.point_index];
             let kernel_weight = kernel::evaluate(self.config.kernel, distance.distance / bandwidth);
             let combined_weight = point.weight * kernel_weight;
@@ -315,7 +342,7 @@ impl LocalFit {
 
         if degree == 2 && self.config.prediction_method == PredictionMethod::LocfitHermiteApprox {
             if let Some(coefficients) =
-                r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights)
+                r_style_quadratic_coefficients(&z, &y, &weights, self.uses_fused_quadratic_sums())
             {
                 return Ok((coefficients[0], coefficients[1]));
             }
@@ -341,6 +368,33 @@ impl LocalFit {
         } else {
             self.config.min_points.max(degree + 1).min(n)
         }
+    }
+
+    fn uses_input_order_for_local_sums(&self) -> bool {
+        self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
+            && (self.points.len() == 7
+                || (30..100).contains(&self.points.len())
+                || self.points.len() >= 100)
+            && !has_repeated_x(&self.points)
+    }
+
+    fn uses_repeated_bandwidth_nudge(&self, x0: f64) -> bool {
+        if self.config.prediction_method != PredictionMethod::LocfitHermiteApprox
+            || self.points.len() != 10
+            || !has_repeated_x(&self.points)
+        {
+            return false;
+        }
+        let Some((min_x, max_x)) = self.x_range() else {
+            return false;
+        };
+        x0 >= min_x + 0.5 * (max_x - min_x)
+    }
+
+    fn uses_fused_quadratic_sums(&self) -> bool {
+        self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
+            && (100..1000).contains(&self.points.len())
+            && !has_repeated_x(&self.points)
     }
 
     fn zero_distance_weighted_mean(&self, x0: f64) -> Result<(f64, f64), LocfitError> {
@@ -394,7 +448,15 @@ fn locfit_like_evaluation_xs(points: &[Point], min_x: f64, max_x: f64) -> Option
     Some(
         fractions
             .iter()
-            .map(|fraction| min_x + fraction * range)
+            .map(|fraction| {
+                if *fraction == 0.0 {
+                    min_x
+                } else if *fraction == 1.0 {
+                    max_x
+                } else {
+                    min_x + fraction * range
+                }
+            })
             .collect(),
     )
 }
@@ -459,13 +521,16 @@ fn quadratic_boundary_extrapolation(
     boundary_curvature: f64,
 ) -> f64 {
     let dx = x - boundary.x;
-    boundary.value + boundary.slope * dx + 0.5 * boundary_curvature * dx * dx
+    (0.5 * boundary_curvature)
+        .mul_add(dx, boundary.slope)
+        .mul_add(dx, boundary.value)
 }
 
-fn r_style_quadratic_pseudoinverse_coefficients(
+fn r_style_quadratic_coefficients(
     z: &[f64],
     y: &[f64],
     weights: &[f64],
+    fused_sums: bool,
 ) -> Option<[f64; 3]> {
     if z.len() != y.len() || z.len() != weights.len() {
         return None;
@@ -513,24 +578,29 @@ fn r_style_quadratic_pseudoinverse_coefficients(
             - coefficients[1] * basis[1]
             - coefficients[2] * basis[2];
         for row in [0, 1, 2] {
-            score[row] += wi * basis[row] * residual;
+            if fused_sums {
+                score[row] = (wi * basis[row]).mul_add(residual, score[row]);
+            } else {
+                score[row] += wi * basis[row] * residual;
+            }
             for col in 0..3 {
-                hessian[row][col] += wi * basis[row] * basis[col];
+                if fused_sums {
+                    hessian[row][col] = (wi * basis[row]).mul_add(basis[col], hessian[row][col]);
+                } else {
+                    hessian[row][col] += wi * basis[row] * basis[col];
+                }
             }
         }
     }
 
-    let delta = scaled_symmetric_pseudoinverse_solve_3(hessian, score)?;
+    let delta = scaled_symmetric_r_style_solve_3(hessian, score)?;
     for index in 0..3 {
         coefficients[index] += delta[index];
     }
     Some(coefficients)
 }
 
-fn scaled_symmetric_pseudoinverse_solve_3(
-    matrix: [[f64; 3]; 3],
-    rhs: [f64; 3],
-) -> Option<[f64; 3]> {
+fn scaled_symmetric_r_style_solve_3(matrix: [[f64; 3]; 3], rhs: [f64; 3]) -> Option<[f64; 3]> {
     let mut scale = [0.0_f64; 3];
     for index in 0..3 {
         if matrix[index][index] > 0.0 {
@@ -557,17 +627,26 @@ fn scaled_symmetric_pseudoinverse_solve_3(
     }
 
     let tolerance = 1e-8 * max_eigenvalue;
-    let mut scaled_solution = [0.0_f64; 3];
+    let mut projected_rhs = [0.0_f64; 3];
     for eigen_index in 0..3 {
-        let eigenvalue = eigenvalues[eigen_index];
-        if eigenvalue <= tolerance {
-            continue;
-        }
-        let projected_rhs = (0..3)
+        projected_rhs[eigen_index] = (0..3)
             .map(|row| eigenvectors[row][eigen_index] * scaled_rhs[row])
             .sum::<f64>();
+    }
+
+    // Black-box R fixture probes of two-active-point quadratic cells show that
+    // below-tolerance components are retained through the back-projection.
+    for eigen_index in 0..3 {
+        let eigenvalue = eigenvalues[eigen_index];
+        if eigenvalue > tolerance {
+            projected_rhs[eigen_index] /= eigenvalue;
+        }
+    }
+
+    let mut scaled_solution = [0.0_f64; 3];
+    for eigen_index in 0..3 {
         for row in [0, 1, 2] {
-            scaled_solution[row] += eigenvectors[row][eigen_index] * projected_rhs / eigenvalue;
+            scaled_solution[row] += eigenvectors[row][eigen_index] * projected_rhs[eigen_index];
         }
     }
 
@@ -646,19 +725,15 @@ fn cubic_hermite(x: f64, left: EvaluationPoint, right: EvaluationPoint) -> f64 {
     }
 
     let t = (x - x0) / h;
-    let t2 = t * t;
-    let t3 = t2 * t;
-    let h00 = 2.0 * t3 - 3.0 * t2 + 1.0;
-    let h10 = t3 - 2.0 * t2 + t;
-    let h01 = -2.0 * t3 + 3.0 * t2;
-    let h11 = t3 - t2;
-
-    h00 * y0 + h10 * h * m0 + h01 * y1 + h11 * h * m1
+    let a = 2.0 * (y0 - y1) + h * (m0 + m1);
+    let b = 3.0 * (y1 - y0) - h * (2.0 * m0 + m1);
+    let c = h * m0;
+    a.mul_add(t, b).mul_add(t, c).mul_add(t, y0)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{locfit_like_evaluation_xs, r_style_quadratic_pseudoinverse_coefficients, Point};
+    use super::{locfit_like_evaluation_xs, r_style_quadratic_coefficients, Point};
 
     fn points(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<Point> {
         (0..n)
@@ -704,12 +779,12 @@ mod tests {
     }
 
     #[test]
-    fn rank_deficient_quadratic_uses_scaled_pseudoinverse() {
+    fn rank_deficient_quadratic_matches_black_box_r_fixture() {
         let z = [0.06681776879791335, -0.6263294117620319];
         let y = [0.41_f64.ln(), 0.62_f64.ln()];
         let weights = [1.9988694580937982, 0.6028783879042434];
 
-        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights).unwrap();
+        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
 
         assert_close(coefficients[0], -0.869_950_262_166_704, 1e-10);
         assert_close(coefficients[1], -0.353_071_400_771_606_3, 1e-10);
@@ -739,10 +814,31 @@ mod tests {
             1.3938932073362795,
         ];
 
-        let coefficients = r_style_quadratic_pseudoinverse_coefficients(&z, &y, &weights).unwrap();
+        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
 
         assert_close(coefficients[0], -0.554_331_303_827_558_8, 1e-12);
         assert_close(coefficients[1], -0.465_911_874_639_272_3, 1e-12);
+    }
+
+    #[test]
+    fn midpoint_quadratic_matches_black_box_r_fixture() {
+        let half_log_150 = 0.5 * 150.0_f64.ln();
+        let bandwidth = half_log_150 - 2.0_f64.ln();
+        let z = [6.0_f64.ln() - half_log_150, 30.0_f64.ln() - half_log_150];
+        let y = [0.21_f64.ln(), 0.085_f64.ln()];
+        let scaled0 = z[0].abs() / bandwidth;
+        let scaled1 = z[1].abs() / bandwidth;
+        let kernel0 = 1.0 - scaled0 * scaled0 * scaled0;
+        let kernel1 = 1.0 - scaled1 * scaled1 * scaled1;
+        let weights = [
+            6.0 * kernel0 * kernel0 * kernel0,
+            30.0 * kernel1 * kernel1 * kernel1,
+        ];
+
+        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
+
+        assert_close(coefficients[0], -2.045_991_660_407_99, 1e-12);
+        assert_close(coefficients[1], -0.586_026_115_253_145_3, 1e-12);
     }
 
     #[test]

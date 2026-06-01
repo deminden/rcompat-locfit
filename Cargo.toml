@@ -1,9 +1,14 @@
 [package]
 name = "rcompat-locfit"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 license = "MIT"
-description = "Clean-room Rust implementation of selected R locfit-compatible local regression behavior"
+description = "R locfit-compatible local regression in Rust, focused on DESeq2 dispersion trend fitting."
+repository = "https://github.com/deminden/rcompat-locfit"
+exclude = [
+    ".github/**",
+    "data/**",
+]
 
 [lib]
 name = "rcompat_locfit"

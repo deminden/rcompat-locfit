@@ -1,6 +1,6 @@
 # rcompat-locfit
 
-`rcompat-locfit` is a fixture-driven Rust crate for selected R
+`rcompat-locfit` is a Rust crate for selected R
 `locfit`-compatible one-dimensional local regression behavior. The first target
 is the local dispersion trend path used by DESeq2-style workflows.
 
@@ -41,14 +41,13 @@ Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
 
 | Fixture set | Max relative error |
 | --- | ---: |
-| Committed real DESeq2-derived subset | `5.17e-11` |
+| Committed real DESeq2-derived subset | `1.33e-13` |
 | Ignored full real DESeq2 hard rows | `1.59e-12` |
 | Ignored full real DESeq2 all rows | `1.78e-12` |
-| Synthetic R `locfit` matrix | `6.51e-10` |
+| Synthetic R `locfit` matrix | `1.90e-13` |
 
 The synthetic matrix intentionally includes edge cases that are outside the
-main DESeq2-sized path. It remains useful as a compatibility target for future
-changes even though the current committed cases are now close to the R oracle.
+main DESeq2-sized path.
 
 ## Usage
 
@@ -86,8 +85,7 @@ Rscript fixtures/r/generate_real_deseq_subset_fixture.R
 
 The default `cargo test` run includes the committed synthetic fixture matrix
 and the committed real DESeq2-derived subset parity check. It does not require
-R. Full real-data diagnostics are ignored by default because they depend on
-local `/data/` tables.
+R.
 
 ## License
 
