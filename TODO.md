@@ -1,6 +1,8 @@
 # TODO
 
 - Confirm R `locfit` parity over additional generated/randomized fixture matrices.
+- Expand compact committed real-shaped fixture coverage when new hard cases
+  expose distinct behavior.
 - Investigate exact R `locfit` evaluation grid / interpolation behavior.
 - Refine the approximate one-dimensional cubic Hermite interpolation over fitted evaluation points.
 - Refine the approximate default `rbox()` evaluation-point generation for the DESeq2 path.

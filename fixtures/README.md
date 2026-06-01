@@ -19,10 +19,18 @@ cargo test --test fixtures
 ```
 
 The default `cargo test` run already checks the committed real DESeq2-derived
-subset and the committed synthetic matrix. Full real-data diagnostics remain
-ignored by default because they use local `/data/` tables. When those ignored
-local tables are available, the ignored fixture tests run full real-data
-diagnostics, including the compressed all-row table.
+subset, the committed 2026 hard-real subset, and the committed synthetic
+matrix. Full real-data diagnostics remain ignored by default because they use
+local `/data/` tables. When those ignored local tables are available, the
+ignored fixture tests run full real-data diagnostics, including the compressed
+all-row table.
+
+The newer ignored 2026 hard-real bundle can also be used for local diagnostics
+when present at `data/locfit_hard_real_2026-06-01`. Those tests use the
+public DESeq2 wrapper across all exported hard rows, use the bundle's stored
+log columns through the public log-column API for the tight global-hardest
+precision probe, and also run a broader prediction-grid guard against raw
+locfit grid outputs.
 
 ## Real DESeq2-Derived Subset
 
@@ -43,4 +51,18 @@ Regenerate it from the repository root with:
 
 ```bash
 Rscript fixtures/r/generate_real_deseq_subset_fixture.R
+```
+
+## 2026 Hard-Real Subset
+
+`hard_real_2026_subset_cases.csv` is a compact committed fixture generated
+from selected contrasts in the ignored 2026 hard-real bundle. It samples
+real-shaped fit rows, anonymizes row labels, and regenerates expected values
+with black-box R `locfit` on the committed subset. The default tests exercise
+both the normal-scale public wrapper and the log-column API on this fixture.
+
+Regenerate it from the repository root with:
+
+```bash
+Rscript fixtures/r/generate_hard_real_2026_subset_fixture.R
 ```
