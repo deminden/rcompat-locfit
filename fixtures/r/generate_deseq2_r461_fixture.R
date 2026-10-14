@@ -11,4 +11,3 @@ writeLines(c(paste0("# r=",getRversion()),paste0("# DESeq2=",packageVersion("DES
 for (i in seq_len(nrow(meta))) writeLines(paste(c(rownames(meta)[[i]],hex(meta$baseMean[[i]]),hex(meta$dispGeneEst[[i]]),hex(log(meta$baseMean[[i]])),hex(log(meta$dispGeneEst[[i]])),hex(log(meta$dispFit[[i]]))),collapse=","),f)
 close(f)
 cat("Real DESeq2 local fit: ",nrow(meta),"genes; fitType",attr(dispersionFunction(dds),"fitType"),"\n")
-
