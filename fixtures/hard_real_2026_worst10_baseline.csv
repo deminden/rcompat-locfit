@@ -1,0 +1,14 @@
+# baseline_commit=e5b68e2adf9770cd4c30e17c2475ba8730b8d623
+# metric=absolute_log_dispersion_error_against_original_committed_R_oracle
+# selection=10_largest_errors_before_any_solver_changes
+case,label,baseline_abs_log_error
+testis_full,range_01,1.98379646043633784e-11
+testis_full,range_11,1.30526700559130404e-11
+testis_full,range_02,7.15522086025544013e-12
+testis_full,hard_00,4.64694949187105522e-12
+testis_full,hard_01,4.52260451311303768e-12
+testis_full,hard_02,4.50306458787963493e-12
+testis_full,hard_03,4.24371648932719836e-12
+testis_full,hard_04,4.24016377564839786e-12
+testis_full,hard_05,4.21884749357559485e-12
+testis_full,hard_06,4.20996570937859360e-12

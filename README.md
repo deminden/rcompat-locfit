@@ -1,61 +1,55 @@
 # rcompat-locfit
 
-`rcompat-locfit` is a Rust crate for selected R
-`locfit`-compatible one-dimensional local regression behavior. The first target
-is the local dispersion trend path used by DESeq2-style workflows.
+`rcompat-locfit` is a pure Rust crate for selected R `locfit`-compatible
+one-dimensional local regression. Its main target is the local dispersion
+trend used by DESeq2-style workflows.
 
-This is a clean-room Rust implementation. It is not a binding to R `locfit`,
-does not call R at runtime, and does not contain code copied or translated from
-R `locfit`, DESeq2, or other copyleft projects. R `locfit` is used only as a
-black-box oracle for generating numeric test fixtures.
+This is a clean-room implementation. It does not call R at runtime and contains
+no code copied or translated from R `locfit`, DESeq2, or other copyleft projects.
+R is used only as a black-box numeric oracle during development.
 
-Current status: validated for targeted DESeq2 local-dispersion compatibility
-work. The DESeq2 wrapper matches black-box R `locfit` very closely on the real
-DESeq2-derived fixtures used during development. Broader exact R `locfit`
-parity is still work in progress, especially around adaptive evaluation grids,
-ties, and singular local designs.
+Version **0.1.5** improves evaluation-grid construction and quadratic fitting
+without changing the public API. See [the changelog](CHANGELOG.md) for details.
+Broader exact `locfit` parity remains work in progress, including ties,
+singular local designs, and behavior across R builds and control settings.
 
 ## Scope
 
-- Pure Rust local polynomial regression in one predictor.
-- Tricube kernel, adaptive nearest-neighbor bandwidth, and prior weights.
-- Local fitted values and local slopes, so future R-style Hermite
-  interpolation can be implemented on top of the direct fits.
-- DESeq2-oriented wrapper:
-  - normal-scale means and dispersions as input;
-  - log(mean) and log(dispersion) fit internally;
-  - original means as prior weights;
-  - an approximate R `locfit`-style Hermite evaluation grid for larger fits;
-  - floor-based nearest-neighbor bandwidth selection for R-style prediction;
-  - R-style handling for tiny rank-deficient quadratic cells;
-  - R-style weighted-quadratic extrapolation outside the evaluation range;
-  - normal-scale dispersion predictions as output;
-  - optional log-column constructor and log-dispersion predictions for callers
-    that already have R-computed `log(mean)` / `log(dispersion)` values.
+- Local polynomial regression in one predictor, with degrees 0, 1, and 2.
+- Tricube kernels, nearest-neighbor bandwidths, and prior weights.
+- Direct fitted values and slopes, plus an adaptive evaluation grid with cubic
+  Hermite interpolation and weighted-quadratic boundary extrapolation.
+- A DESeq2-oriented wrapper that fits `log(dispersion)` against `log(mean)`,
+  uses normal-scale means as prior weights, and excludes dispersions below
+  `min_disp * 10`.
+- Normal-scale predictions and a log-column constructor with log-dispersion
+  predictions for callers that already have precomputed natural logs.
 
-This crate is not a full port of R `locfit` and does not attempt to clone its
-public API.
+This crate implements selected behavior rather than the full R `locfit` API.
 
-## Parity
+## Current precision
 
-The current implementation is validated against black-box R `locfit` fixtures.
-Recent local measurements were run with R 4.6.0 and `locfit` 1.5-9.12:
+Measured maximum errors for version **0.1.5** on macOS arm64:
 
-| Fixture set | Max observed error |
-| --- | ---: |
-| Committed real DESeq2-derived subset | `1.33e-13` |
-| Committed 2026 hard-real subset, public wrapper | `1.61e-8` |
-| Committed 2026 hard-real subset, log API | `1.99e-11` |
-| Ignored full real DESeq2 hard rows | `1.59e-12` |
-| Ignored full real DESeq2 all rows | `1.78e-12` |
-| Ignored 2026 hard-real all hard rows | `3.77e-8` |
-| Ignored 2026 hard-real global hardest rows | `3.86e-10` |
-| Synthetic R `locfit` matrix | `1.90e-13` |
+| Validation set | Error measure | Maximum error |
+| --- | --- | ---: |
+| Synthetic `locfit` matrix | Relative dispersion error | `1.8970e-13` |
+| Curated real DESeq2-derived subset | Relative dispersion error | `1.3319e-13` |
+| Hard-real subset, stored-log API: 72 predictions | Absolute log-dispersion error | `1.9645e-11` |
+| Hard-real subset, normal API with identical oracle inputs | Relative dispersion error | `1.3053e-11` |
+| Actual DESeq2 local fit: 1,198 gene predictions | Absolute log-dispersion error | `1.6741e-11` |
 
-The synthetic matrix intentionally includes edge cases that are outside the
-main DESeq2-sized path. Public-wrapper rows report normal-scale relative
-error. The 2026 log-API rows use stored log columns to avoid normal-scale TSV
-rounding; their reported errors are absolute log-dispersion differences.
+The quadratic-fitting improvements achieved **39.04–39.78× lower log error**
+on seven difficult predictions, **292.69×** and **221.85×** on two others,
+and an exact oracle match on a tenth. Maximum absolute log error across these
+ten predictions is **`1.1902e-13`**. The table reports accuracy across the full
+validation sets.
+
+The DESeq2 comparison uses R 4.6.1, DESeq2 1.52.0, and `locfit` 1.5-9.12,
+running `DESeq(fitType="local")` on seeded simulated counts with 1,200 genes
+and 12 samples. These measurements validate the local dispersion trend.
+[The fixture guide](fixtures/README.md) documents oracle provenance and the
+per-case gains.
 
 ## Usage
 
@@ -83,33 +77,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-## Fixture Generation
+## Validation
 
-Fixtures are generated with R `locfit` as a black-box oracle. The script does
-not require DESeq2.
-
-```bash
-Rscript fixtures/r/generate_locfit_fixtures.R
-cargo test --test fixtures -- --ignored
-```
-
-The committed real DESeq2-derived subset can be regenerated from the ignored
-local `/data/` debug tables with:
+Run the self-contained checks without R:
 
 ```bash
-Rscript fixtures/r/generate_real_deseq_subset_fixture.R
+cargo test --locked
+cargo test --locked --release
 ```
 
-The committed 2026 hard-real subset can be regenerated from the ignored 2026
-hard-real bundle with:
+Tests cover synthetic edge cases, real-derived subsets, exact input transport,
+precision regressions, and the DESeq2 local-fit comparison.
 
-```bash
-Rscript fixtures/r/generate_hard_real_2026_subset_fixture.R
-```
-
-The default `cargo test` run includes the committed synthetic fixture matrix
-and the committed real-derived subset parity checks. It does not require R.
+R is needed only to regenerate fixtures. See [the fixture guide](fixtures/README.md)
+for commands, input formats, and dataset details.
 
 ## License
 
-MIT. See `LICENSE`.
+MIT. See [LICENSE](LICENSE).

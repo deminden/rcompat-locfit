@@ -7,6 +7,11 @@
 //! The DESeq2-oriented path is fixture-validated against black-box R `locfit`;
 //! broader exact R `locfit` parity is still in progress.
 //!
+//! The DESeq2 wrapper uses an adaptive evaluation grid with cubic Hermite
+//! interpolation and quadratic boundary extrapolation. Callers with original
+//! precomputed log columns can use [`fit_deseq2_local_dispersion_trend_from_logs`]
+//! to preserve those input values when comparing against R.
+//!
 //! # Example
 //!
 //! ```

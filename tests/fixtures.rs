@@ -1133,3 +1133,199 @@ fn synthetic_case_tolerance(case_name: &str) -> f64 {
         _ => DEFAULT_SYNTHETIC_REL_TOLERANCE,
     }
 }
+
+fn load_identical_input_normal_oracles() -> BTreeMap<(String, String), f64> {
+    let source = fs::read_to_string("fixtures/hard_real_2026_identical_input_oracles.csv")
+        .expect("missing identical-input R oracle");
+    let mut rows = BTreeMap::new();
+    for line in source
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("case,") && !line.is_empty())
+    {
+        let fields: Vec<_> = line.split(',').collect();
+        assert_eq!(fields.len(), 5);
+        assert!(rows
+            .insert(
+                (fields[0].into(), fields[1].into()),
+                fields[2].parse().unwrap()
+            )
+            .is_none());
+    }
+    assert_eq!(rows.len(), 72);
+    rows
+}
+
+fn oracle_input_double(hex: &str) -> f64 {
+    assert_eq!(hex.len(), 16);
+    let mut bytes = [0_u8; 8];
+    for (index, byte) in bytes.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&hex[2 * index..2 * index + 2], 16).unwrap();
+    }
+    f64::from_le_bytes(bytes)
+}
+
+#[test]
+fn hard_real_oracle_inputs_are_bit_identical_to_api_inputs() {
+    let cases = load_hard_real_2026_committed_cases();
+    let source = fs::read_to_string("fixtures/hard_real_2026_oracle_inputs.csv").unwrap();
+    let mut checked = 0;
+    for line in source
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("case,") && !line.is_empty())
+    {
+        let fields: Vec<_> = line.split(',').collect();
+        assert_eq!(fields.len(), 8);
+        let case = &cases[fields[0]];
+        let index: usize = fields[2].parse().unwrap();
+        let (mean, disp, log_mean, log_disp) = if fields[1] == "input" {
+            (
+                case.means[index],
+                Some(case.disps[index]),
+                case.log_means[index],
+                Some(case.log_disps[index]),
+            )
+        } else {
+            let prediction = &case.predictions[index];
+            assert_eq!(fields[3], prediction.label);
+            (prediction.mean, None, prediction.log_mean, None)
+        };
+        assert_eq!(oracle_input_double(fields[4]).to_bits(), mean.to_bits());
+        assert_eq!(oracle_input_double(fields[6]).to_bits(), log_mean.to_bits());
+        for (field, expected) in [(fields[5], disp), (fields[7], log_disp)] {
+            if let Some(expected) = expected {
+                assert_eq!(oracle_input_double(field).to_bits(), expected.to_bits());
+            } else {
+                assert!(field.is_empty());
+            }
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 3 * 192 + 72);
+}
+
+#[test]
+fn hard_real_frozen_worst10_log_predictions_improve_tenfold() {
+    let cases = load_hard_real_2026_committed_cases();
+    let trends: BTreeMap<_, _> = cases
+        .iter()
+        .map(|(name, case)| {
+            (
+                name,
+                fit_deseq2_local_dispersion_trend_from_logs(
+                    &case.log_means,
+                    &case.log_disps,
+                    &case.means,
+                    MIN_DISP,
+                )
+                .unwrap(),
+            )
+        })
+        .collect();
+    let source = fs::read_to_string("fixtures/hard_real_2026_worst10_baseline.csv").unwrap();
+    let mut checked = 0;
+    let mut failures = Vec::new();
+    for line in source
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("case,") && !line.is_empty())
+    {
+        let fields: Vec<_> = line.split(',').collect();
+        assert_eq!(fields.len(), 3);
+        let case = &cases[fields[0]];
+        let prediction = case
+            .predictions
+            .iter()
+            .find(|prediction| prediction.label == fields[1])
+            .unwrap();
+        let baseline: f64 = fields[2].parse().unwrap();
+        let actual = trends[&fields[0].to_string()]
+            .predict_log_dispersion_one(prediction.log_mean)
+            .unwrap();
+        let error = (actual - prediction.expected_log).abs();
+        let limit = baseline / 10.0;
+        eprintln!(
+            "{}/{}: baseline={baseline:.17e} actual_error={error:.17e} limit={limit:.17e}",
+            fields[0], fields[1]
+        );
+        if error > limit {
+            failures.push(format!(
+                "{}/{}: error {error} exceeds tenfold target {limit}",
+                fields[0], fields[1]
+            ));
+        }
+        checked += 1;
+    }
+    assert_eq!(checked, 10);
+    assert!(
+        failures.is_empty(),
+        "tenfold log precision failures:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[test]
+fn real_deseq2_r461_local_trend_parity() {
+    let source = fs::read_to_string("fixtures/deseq2_r461_local_trend.csv").unwrap();
+    let mut means = Vec::new();
+    let mut disps = Vec::new();
+    let mut log_means = Vec::new();
+    let mut log_disps = Vec::new();
+    let mut predictions = Vec::new();
+    for line in source
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.starts_with("gene,") && !line.is_empty())
+    {
+        let fields: Vec<_> = line.split(',').collect();
+        assert_eq!(fields.len(), 6);
+        means.push(oracle_input_double(fields[1]));
+        disps.push(oracle_input_double(fields[2]));
+        log_means.push(oracle_input_double(fields[3]));
+        log_disps.push(oracle_input_double(fields[4]));
+        predictions.push((fields[0].to_string(), oracle_input_double(fields[5])));
+    }
+    assert_eq!(means.len(), 1198);
+    let log_trend =
+        fit_deseq2_local_dispersion_trend_from_logs(&log_means, &log_disps, &means, MIN_DISP)
+            .unwrap();
+    let normal_trend = fit_deseq2_local_dispersion_trend(&means, &disps, MIN_DISP).unwrap();
+    let mut max_error = 0.0_f64;
+    for (index, (gene, expected)) in predictions.iter().enumerate() {
+        for actual in [
+            log_trend
+                .predict_log_dispersion_one(log_means[index])
+                .unwrap(),
+            normal_trend.predict_one(means[index]).unwrap().ln(),
+        ] {
+            let error = (actual - expected).abs();
+            max_error = max_error.max(error);
+            assert!(
+                error <= 2e-11,
+                "DESeq2 1.52 local trend {gene}: log error {error}"
+            );
+        }
+    }
+    eprintln!("DESeq2 R4.6.1 local trend max log error across 1198 genes: {max_error}");
+}
+
+#[test]
+fn hard_real_identical_input_public_wrapper_parity() {
+    let normal_oracle = load_identical_input_normal_oracles();
+    let mut max_relative = 0.0_f64;
+    let mut checked = 0;
+    for (name, case) in load_hard_real_2026_committed_cases() {
+        let trend = fit_deseq2_local_dispersion_trend(&case.means, &case.disps, MIN_DISP).unwrap();
+        for prediction in case.predictions {
+            let expected = normal_oracle[&(name.clone(), prediction.label.clone())];
+            let actual = trend.predict_one(prediction.mean).unwrap();
+            let relative = relative_error(actual, expected);
+            assert!(
+                relative <= 5e-11,
+                "identical-input normal oracle {name}/{}: relative error {relative}",
+                prediction.label
+            );
+            max_relative = max_relative.max(relative);
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 72);
+    eprintln!("identical-input normal oracle max relative error: {max_relative}");
+}

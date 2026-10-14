@@ -13,10 +13,12 @@ struct Point {
 
 /// Fitted one-dimensional local polynomial regression model.
 ///
-/// The model stores validated finite observations and prior weights. At each
-/// prediction point it chooses an adaptive nearest-neighbor bandwidth, applies
-/// the configured kernel, multiplies by prior weights, and returns the local
-/// polynomial intercept.
+/// The model stores validated finite observations and prior weights. Direct
+/// prediction selects a nearest-neighbor bandwidth, applies the configured
+/// kernel and prior weights, and returns the local polynomial intercept.
+/// With [`PredictionMethod::LocfitHermiteApprox`], the model instead caches
+/// fitted values and slopes on an adaptive grid, interpolates between grid
+/// points, and uses weighted-quadratic extrapolation outside the grid.
 #[derive(Clone, Debug)]
 pub struct LocalFit {
     points: Vec<Point>,
@@ -198,9 +200,7 @@ impl LocalFit {
             return Ok(None);
         }
 
-        let Some(xs) = locfit_like_evaluation_xs(&self.points, min_x, max_x) else {
-            return Ok(None);
-        };
+        let xs = locfit_like_evaluation_xs(&self.points, min_x, max_x, self.config.alpha)?;
 
         let mut evaluation_points = Vec::with_capacity(xs.len());
         for x in xs {
@@ -428,91 +428,83 @@ struct EvaluationPoint {
     slope: f64,
 }
 
-fn locfit_like_evaluation_xs(points: &[Point], min_x: f64, max_x: f64) -> Option<Vec<f64>> {
-    if points.len() < 2 {
-        return None;
+/// R's default rbox precision is 0.8: split a cell whose width exceeds
+/// 0.8 times the smaller bandwidth at its corners. Derive the mesh from the
+/// predictor geometry rather than selecting a template by sample count.
+fn locfit_like_evaluation_xs(
+    points: &[Point],
+    min_x: f64,
+    max_x: f64,
+    alpha: f64,
+) -> Result<Vec<f64>, LocfitError> {
+    #[derive(Clone, Copy)]
+    struct Cell {
+        left_fraction: f64,
+        left: f64,
+        left_bandwidth: f64,
+        right_fraction: f64,
+        right: f64,
+        right_bandwidth: f64,
+        depth: usize,
     }
-
-    let fractions: &[f64] = match locfit_like_fraction_set(points) {
-        FractionSet::Quarters => &[0.0, 0.25, 0.5, 0.75, 1.0],
-        FractionSet::Eighths => &[0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0],
-        FractionSet::LowerSixteenths => &[
-            0.0, 0.0625, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0,
-        ],
-        FractionSet::InteriorLowerEighths => &[0.0, 0.125, 0.25, 0.375, 0.5, 0.75, 1.0],
-        FractionSet::LargeWeighted => &[0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0],
-        FractionSet::UniformSixPoint => &[0.0, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0],
+    let neighbors = ((alpha * points.len() as f64).floor() as usize).clamp(1, points.len());
+    let bandwidth = |x: f64| {
+        let mut distances: Vec<_> = points.iter().map(|point| (point.x - x).abs()).collect();
+        distances.select_nth_unstable_by(neighbors - 1, f64::total_cmp);
+        distances[neighbors - 1]
     };
-
-    let range = max_x - min_x;
-    Some(
-        fractions
-            .iter()
-            .map(|fraction| {
-                if *fraction == 0.0 {
-                    min_x
-                } else if *fraction == 1.0 {
-                    max_x
-                } else {
-                    min_x + fraction * range
-                }
-            })
-            .collect(),
-    )
-}
-
-fn locfit_like_fraction_set(points: &[Point]) -> FractionSet {
-    // This is an empirical approximation to R locfit's default one-dimensional
-    // `rbox()` evaluation structure. Black-box probes show dyadic fractions
-    // whose depth depends on small sample size, repeated x values, and large
-    // DESeq2-style prior-weight variation.
-    let n = points.len();
-    let repeated_x = has_repeated_x(points);
-    let varied_weights = has_varied_weights(points);
-
-    if n <= 4 && varied_weights {
-        FractionSet::LowerSixteenths
-    } else if n == 5 && varied_weights {
-        FractionSet::InteriorLowerEighths
-    } else if n <= 5 {
-        FractionSet::Eighths
-    } else if n == 6 && !varied_weights {
-        FractionSet::UniformSixPoint
-    } else if n <= 7 {
-        FractionSet::Eighths
-    } else if n >= 100 && varied_weights {
-        FractionSet::LargeWeighted
-    } else if repeated_x {
-        FractionSet::InteriorLowerEighths
-    } else {
-        FractionSet::Quarters
+    let mut xs = vec![min_x, max_x];
+    let mut cells = vec![Cell {
+        left_fraction: 0.0,
+        left: min_x,
+        left_bandwidth: bandwidth(min_x),
+        right_fraction: 1.0,
+        right: max_x,
+        right_bandwidth: bandwidth(max_x),
+        depth: 0,
+    }];
+    while let Some(cell) = cells.pop() {
+        if cell.right - cell.left <= 0.8 * cell.left_bandwidth.min(cell.right_bandwidth) {
+            continue;
+        }
+        let fraction = 0.5 * (cell.left_fraction + cell.right_fraction);
+        // Use one range coordinate system at all depths. This preserves the
+        // established dyadic-coordinate rounding in the committed fixtures.
+        let midpoint = min_x + fraction * (max_x - min_x);
+        if midpoint == cell.left || midpoint == cell.right {
+            continue;
+        }
+        if !midpoint.is_finite() || cell.depth >= 48 || xs.len() >= 1024 {
+            return Err(LocfitError::InvalidInput(
+                "evaluation grid exceeds the finite subdivision limit".into(),
+            ));
+        }
+        let midpoint_bandwidth = bandwidth(midpoint);
+        xs.push(midpoint);
+        cells.push(Cell {
+            left_fraction: fraction,
+            left: midpoint,
+            left_bandwidth: midpoint_bandwidth,
+            depth: cell.depth + 1,
+            ..cell
+        });
+        cells.push(Cell {
+            right_fraction: fraction,
+            right: midpoint,
+            right_bandwidth: midpoint_bandwidth,
+            depth: cell.depth + 1,
+            ..cell
+        });
     }
+    xs.sort_by(f64::total_cmp);
+    xs.dedup();
+    Ok(xs)
 }
 
 fn has_repeated_x(points: &[Point]) -> bool {
     let mut xs: Vec<_> = points.iter().map(|point| point.x).collect();
     xs.sort_by(f64::total_cmp);
     xs.windows(2).any(|window| window[0] == window[1])
-}
-
-fn has_varied_weights(points: &[Point]) -> bool {
-    let mut min_weight = f64::INFINITY;
-    let mut max_weight = 0.0_f64;
-    for point in points {
-        min_weight = min_weight.min(point.weight);
-        max_weight = max_weight.max(point.weight);
-    }
-    max_weight > min_weight * (1.0 + 1e-12)
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum FractionSet {
-    Quarters,
-    Eighths,
-    LowerSixteenths,
-    InteriorLowerEighths,
-    LargeWeighted,
-    UniformSixPoint,
 }
 
 fn quadratic_boundary_extrapolation(
@@ -570,9 +562,13 @@ fn r_style_quadratic_coefficients(
 
     let mut hessian = [[0.0_f64; 3]; 3];
     let mut score = [0.0_f64; 3];
+    let mut cubic_moment = 0.0_f64;
 
     for ((&zi, &yi), &wi) in z.iter().zip(&y).zip(&weights) {
         let basis = [1.0, zi, 0.5 * zi * zi];
+        if fused_sums {
+            cubic_moment = wi.mul_add(0.5 * zi * zi * zi, cubic_moment);
+        }
         let residual = yi
             - coefficients[0] * basis[0]
             - coefficients[1] * basis[1]
@@ -584,6 +580,9 @@ fn r_style_quadratic_coefficients(
                 score[row] += wi * basis[row] * residual;
             }
             for col in 0..3 {
+                if fused_sums && ((row == 1 && col == 2) || (row == 2 && col == 1)) {
+                    continue;
+                }
                 if fused_sums {
                     hessian[row][col] = (wi * basis[row]).mul_add(basis[col], hessian[row][col]);
                 } else {
@@ -593,14 +592,68 @@ fn r_style_quadratic_coefficients(
         }
     }
 
-    let delta = scaled_symmetric_r_style_solve_3(hessian, score)?;
+    if fused_sums {
+        // Both entries are the same weighted cubic moment. Accumulating the
+        // moment once avoids a rounding-dependent asymmetry from multiplying
+        // the prior weight by a different basis column first. Keep the scalar
+        // accumulation path unchanged for its established tiny-cell semantics.
+        hessian[1][2] = cubic_moment;
+        hessian[2][1] = cubic_moment;
+    }
+    let delta = scaled_symmetric_r_style_solve_3(hessian, score, fused_sums)?;
     for index in 0..3 {
         coefficients[index] += delta[index];
     }
     Some(coefficients)
 }
 
-fn scaled_symmetric_r_style_solve_3(matrix: [[f64; 3]; 3], rhs: [f64; 3]) -> Option<[f64; 3]> {
+fn scaled_symmetric_r_style_solve_3(
+    matrix: [[f64; 3]; 3],
+    rhs: [f64; 3],
+    compare_orderings: bool,
+) -> Option<[f64; 3]> {
+    let original = solve_scaled_quadratic_system(matrix, rhs, false)?;
+    if !compare_orderings {
+        return Some(original);
+    }
+
+    // Covariance entries can differ by an ulp when their products are grouped
+    // differently. Retry with one symmetric triangle and grouped scaling, then
+    // keep the solution with the smaller relative normal-equation residual.
+    // Apply the same residual criterion to global and local quadratics.
+    let candidate = solve_scaled_quadratic_system(matrix, rhs, true)?;
+    if relative_equation_residual(matrix, rhs, candidate)
+        < relative_equation_residual(matrix, rhs, original)
+    {
+        Some(candidate)
+    } else {
+        Some(original)
+    }
+}
+
+fn relative_equation_residual(matrix: [[f64; 3]; 3], rhs: [f64; 3], solution: [f64; 3]) -> f64 {
+    let mut norm = 0.0;
+    for row in 0..3 {
+        let residual = matrix[row][0] * solution[0]
+            + matrix[row][1] * solution[1]
+            + matrix[row][2] * solution[2]
+            - rhs[row];
+        let relative = residual.abs() / rhs[row].abs().max(f64::MIN_POSITIVE);
+        norm += relative * relative;
+    }
+    norm
+}
+
+fn solve_scaled_quadratic_system(
+    mut matrix: [[f64; 3]; 3],
+    rhs: [f64; 3],
+    symmetric: bool,
+) -> Option<[f64; 3]> {
+    if symmetric {
+        matrix[0][1] = matrix[1][0];
+        matrix[0][2] = matrix[2][0];
+        matrix[1][2] = matrix[2][1];
+    }
     let mut scale = [0.0_f64; 3];
     for index in 0..3 {
         if matrix[index][index] > 0.0 {
@@ -616,11 +669,15 @@ fn scaled_symmetric_r_style_solve_3(matrix: [[f64; 3]; 3], rhs: [f64; 3]) -> Opt
     for row in 0..3 {
         scaled_rhs[row] = rhs[row] * scale[row];
         for col in 0..3 {
-            scaled_matrix[row][col] = matrix[row][col] * scale[row] * scale[col];
+            scaled_matrix[row][col] = if symmetric {
+                matrix[row][col] * (scale[row] * scale[col])
+            } else {
+                matrix[row][col] * scale[row] * scale[col]
+            };
         }
     }
 
-    let (eigenvalues, eigenvectors) = symmetric_eigen_decomposition_3(scaled_matrix);
+    let (eigenvalues, eigenvectors) = symmetric_eigen_decomposition_3(scaled_matrix, symmetric);
     let max_eigenvalue = eigenvalues.iter().copied().fold(0.0_f64, f64::max);
     if max_eigenvalue <= 0.0 {
         return Some([0.0; 3]);
@@ -657,7 +714,10 @@ fn scaled_symmetric_r_style_solve_3(matrix: [[f64; 3]; 3], rhs: [f64; 3]) -> Opt
     Some(solution)
 }
 
-fn symmetric_eigen_decomposition_3(mut matrix: [[f64; 3]; 3]) -> ([f64; 3], [[f64; 3]; 3]) {
+fn symmetric_eigen_decomposition_3(
+    mut matrix: [[f64; 3]; 3],
+    fused_radius: bool,
+) -> ([f64; 3], [[f64; 3]; 3]) {
     // Fixed row/column Jacobi sweeps keep repeated-point cells aligned with
     // locfit's scaled normal-equation solve, where tiny rotation-order
     // differences are visible in parity fixtures.
@@ -675,7 +735,11 @@ fn symmetric_eigen_decomposition_3(mut matrix: [[f64; 3]; 3]) -> ([f64; 3], [[f6
 
             let mut cosine = (matrix[q][q] - matrix[p][p]) / 2.0;
             let mut sine = -matrix[p][q];
-            let radius = (cosine * cosine + sine * sine).sqrt();
+            let radius = if fused_radius {
+                cosine.mul_add(cosine, sine * sine).sqrt()
+            } else {
+                (cosine * cosine + sine * sine).sqrt()
+            };
             cosine /= radius;
             sine = ((1.0 - cosine) / 2.0).sqrt() * if sine > 0.0 { 1.0 } else { -1.0 };
             cosine = ((1.0 + cosine) / 2.0).sqrt();
@@ -771,7 +835,7 @@ mod tests {
             .iter()
             .map(|point| point.x)
             .fold(f64::NEG_INFINITY, f64::max);
-        locfit_like_evaluation_xs(&points, min_x, max_x)
+        locfit_like_evaluation_xs(&points, min_x, max_x, 0.7)
             .unwrap()
             .into_iter()
             .map(|x| (x - min_x) / (max_x - min_x))
@@ -855,42 +919,33 @@ mod tests {
     }
 
     #[test]
-    fn locfit_like_grid_adds_lower_sixteenths_for_four_weighted_points() {
+    fn locfit_like_grid_matches_r_box_on_four_uniform_weighted_points() {
         assert_eq!(
             fractions(4, true, false),
-            vec![0.0, 0.0625, 0.125, 0.1875, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
+            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
         );
     }
 
     #[test]
-    fn locfit_like_grid_uses_interior_lower_eighths_for_five_weighted_points() {
+    fn locfit_like_grid_matches_r_box_on_five_uniform_weighted_points() {
         assert_eq!(
             fractions(5, true, false),
-            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.75, 1.0]
+            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875, 1.0]
         );
     }
 
     #[test]
-    fn locfit_like_grid_refines_repeated_x_region() {
-        assert_eq!(
-            fractions(12, true, true),
-            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.75, 1.0]
-        );
+    fn locfit_like_grid_matches_r_box_on_uniform_predictors_with_a_tie() {
+        assert_eq!(fractions(12, true, true), vec![0.0, 0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]
-    fn locfit_like_grid_matches_large_weighted_deseq2_shape() {
-        assert_eq!(
-            fractions(384, true, false),
-            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0]
-        );
+    fn locfit_like_grid_matches_r_box_on_large_uniform_predictors() {
+        assert_eq!(fractions(384, true, false), vec![0.0, 0.25, 0.5, 0.75, 1.0]);
     }
 
     #[test]
-    fn locfit_like_grid_large_weighted_fit_takes_precedence_over_repeated_x() {
-        assert_eq!(
-            fractions(384, true, true),
-            vec![0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 1.0]
-        );
+    fn locfit_like_grid_matches_r_box_on_large_uniform_predictors_with_a_tie() {
+        assert_eq!(fractions(384, true, true), vec![0.0, 0.25, 0.5, 0.75, 1.0]);
     }
 }

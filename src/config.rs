@@ -12,10 +12,10 @@ pub enum Kernel {
 pub enum PredictionMethod {
     /// Fit the local polynomial directly at each requested prediction point.
     Direct,
-    /// Approximate R `locfit`'s two-step prediction behavior for larger
-    /// one-dimensional fits: compute direct fits on a small evaluation grid,
-    /// then use cubic Hermite interpolation between those grid points and
-    /// weighted-quadratic extrapolation outside the grid.
+    /// Approximate R `locfit`'s two-step prediction behavior for one-dimensional
+    /// fits: compute values and slopes on an adaptive evaluation grid derived
+    /// from predictor geometry and nearest-neighbor bandwidths, then use cubic
+    /// Hermite interpolation and weighted-quadratic boundary extrapolation.
     LocfitHermiteApprox,
 }
 
