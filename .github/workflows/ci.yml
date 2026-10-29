@@ -19,16 +19,25 @@ env:
 
 jobs:
   rust:
-    name: Rust
-    runs-on: ubuntu-latest
+    name: Rust ${{ matrix.toolchain }} / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable, "1.85.0"]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Install Rust
         run: |
-          rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-          rustup default stable
+          rustup toolchain install "${{ matrix.toolchain }}" --profile minimal
+          rustup default "${{ matrix.toolchain }}"
+
+      - name: Install quality-check components
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
+        run: rustup component add rustfmt clippy
 
       - name: Cache Cargo
         uses: actions/cache@v4
@@ -37,25 +46,32 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.toolchain }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ matrix.toolchain }}-
 
       - name: Check formatting
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: cargo fmt --all -- --check
 
       - name: Run tests
         run: cargo test --locked
 
+      - name: Run release tests
+        run: cargo test --locked --release
+
       - name: Run clippy
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Build docs
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --locked --no-deps
 
       - name: Package crate
+        if: matrix.os == 'ubuntu-latest' && matrix.toolchain == 'stable'
         run: cargo package --locked
 
   publish:

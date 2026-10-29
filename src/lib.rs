@@ -35,8 +35,8 @@ pub mod wls;
 
 pub use config::{Kernel, LocalRegressionConfig, PredictionMethod};
 pub use deseq2::{
-    fit_deseq2_local_dispersion_trend, fit_deseq2_local_dispersion_trend_from_logs,
-    Deseq2LocalDispersionTrend,
+    Deseq2LocalDispersionTrend, fit_deseq2_local_dispersion_trend,
+    fit_deseq2_local_dispersion_trend_from_logs,
 };
 pub use error::LocfitError;
 pub use local_fit::LocalFit;

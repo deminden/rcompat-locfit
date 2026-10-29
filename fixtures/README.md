@@ -1,148 +1,126 @@
-# Fixtures
+# R 4.6.2 fixtures
 
-The committed fixtures use R `locfit` and DESeq2 only as black-box numeric
-oracles. Default tests require neither R nor the external full-data tables.
+All numerical oracles use R 4.6.2. R is a black-box reference; no locfit or
+DESeq2 implementation source is copied or translated into this crate.
 
-| Fixture | Purpose |
+| File | Purpose |
 | --- | --- |
-| `locfit_deseq2_cases.csv` | Synthetic trends, boundaries, repeated means, tiny weighted fits, and filtering |
-| `real_deseq2_subset_cases.csv` | Compact real-derived subset |
-| `hard_real_2026_subset_cases.csv` | Three 192-point hard-real cases and 72 predictions; original frozen log oracle |
-| `hard_real_2026_oracle_inputs.csv` | Exact binary inputs for all 648 input and prediction rows |
-| `hard_real_2026_identical_input_oracles.csv` | Separate normal-input and stored-log outputs from identical doubles |
-| `hard_real_2026_worst10_baseline.csv` | Original ten largest log errors at commit `e5b68e2`, used for individual tenfold targets |
-| `deseq2_r461_local_trend.csv` | Actual DESeq2 local-fit holdout on seeded simulated counts |
+| `deseq2_r462_hard_cases.csv` | Complete fitting inputs and difficult predictions from actual DESeq2 runs |
+| `deseq2_r462_hard_queries.csv` | Fixed gene identities: 32 hard queries per dataset plus mean-count quantiles |
+| `deseq2_r462_baseline.csv` | Frozen pre-refinement errors for both APIs and expected prediction bits |
+| `locfit_r462_cases.csv` | Synthetic coverage of boundaries, ties, small fits, and filtering |
 
-Generate the synthetic matrix from the repository root:
+The two case fixtures share a schema with case, row kind, gene/query identity,
+and little-endian IEEE754 binary64 hexadecimal values. The query manifest
+records gene identities and selection categories; the baseline records expected
+prediction bits and decimal absolute errors. Fitting inputs and expected
+predictions pass from R to Rust without decimal rounding. Default tests require
+neither R nor external data.
 
-```bash
-Rscript fixtures/r/generate_locfit_fixtures.R
-```
+## DESeq2 datasets
 
-Run the committed fixture parity checks with:
+The reference environment has R 4.6.2, DESeq2 1.52.0, locfit 1.5-9.12, and
+airway 1.32.0. Runtime, package, platform, and query-manifest metadata are
+recorded in the fixture.
 
-```bash
-cargo test --test fixtures
-```
+- `airway_full`: 22,369 real genes with raw row sums at least 10; design
+  `~ cell + dex`, eight samples, 8,942 active fitting observations.
+- `airway_512`: 512 equally spaced raw-mean ranks from the same counts,
+  with 213 active fitting observations.
+- `simulated_600`: 600 genes and 12 samples, seed 462 and `betaSD=1`, yielding
+  599 usable gene predictions and 579 active fitting observations.
 
-The default `cargo test` run already checks the committed real DESeq2-derived
-subset, the committed 2026 hard-real subset, the synthetic matrix, the binary
-input identity, the frozen ten-case targets, and the DESeq2 holdout. Full real-data diagnostics remain ignored by default because they use
-local `/data/` tables. When those ignored local tables are available, the
-ignored fixture tests run full real-data diagnostics, including the compressed
-all-row table.
+Every observation entering the local trend is retained. Predictions include
+low-dispersion genes excluded from fitting, and queries outside the fitting
+range exercise extrapolation.
+The query manifest preserves 32 largest observed errors per case, considering
+both APIs, plus mean-count quantiles with duplicates removed. The 133 query
+identities are not reselected when the solver changes.
 
-The newer ignored 2026 hard-real bundle can also be used for local diagnostics
-when present at `data/locfit_hard_real_2026-06-01`. Those tests use the
-public DESeq2 wrapper across all exported hard rows, use the bundle's stored
-log columns through the public log-column API for the tight global-hardest
-precision probe, and also run a broader prediction-grid guard against raw
-locfit grid outputs.
+## Regeneration
 
-## Real DESeq2-Derived Subset
-
-`real_deseq2_subset_cases.csv` is a compact committed fixture generated from
-the ignored local `/data/` debug tables:
-
-- `data/local_dispersion_fit_points.tsv`
-- `data/local_dispersion_ranked_hard_rows.tsv`
-- `data/local_dispersion_all_rows.tsv.gz`
-
-It intentionally does not commit the full data tables. Instead, it samples
-real fit rows across the base-mean range and prediction rows from low-mean hard
-cases plus range quantiles. Expected values are regenerated with black-box R
-`locfit` on the committed subset so the fixture is self-contained and does not
-pretend that a small subset can reproduce the original full-data DESeq2 fit.
-
-Regenerate it from the repository root with:
+Run from the repository root with R 4.6.2 and the package versions listed above:
 
 ```bash
-Rscript fixtures/r/generate_real_deseq_subset_fixture.R
+Rscript fixtures/r/generate_deseq2_r462_hard_fixtures.R
+Rscript fixtures/r/generate_locfit_r462_fixtures.R
+cargo run --release --example precision
 ```
 
-## 2026 Hard-Real Subset
+Generators reject other R versions. Repeated native generation must reproduce
+the same numeric bytes. Compiler/package builds can affect floating-point
+results, so fixture changes must be reviewed independently of solver changes.
 
-`hard_real_2026_subset_cases.csv` is a compact committed fixture generated
-from selected contrasts in the ignored 2026 hard-real bundle. It samples
-real-shaped fit rows, anonymizes row labels, and regenerates expected values
-with black-box R `locfit` on the committed subset. The default tests exercise
-both the normal-scale public wrapper and the log-column API on this fixture.
+## Precision gate
 
-Regenerate it from the repository root with:
+The baseline was frozen before numerical refinement. The strict test requires
+each of the 96 selected hard predictions to have at most one tenth of its
+baseline error, through both the normal-input and stored-log APIs. Each
+case's maximum across every query must also shrink tenfold. The original
+expected prediction bits are checked against the baseline.
 
-```bash
-Rscript fixtures/r/generate_hard_real_2026_subset_fixture.R
-```
+The same test also enforces absolute log-error limits for every committed
+prediction through both APIs, including range queries:
 
-## Identical binary inputs
-
-R and Rust can parse the same decimal text into different last bits. The
-binary-input snapshot transports each double as 16 hexadecimal characters
-representing its eight IEEE754 bytes in little-endian order. The R generator
-decodes these bytes with `readBin` and verifies a `writeBin` roundtrip. A Rust
-test checks the snapshot against the actual API inputs bit for bit.
-
-Regenerate the transport and its separate oracle with an R environment
-containing `locfit`:
-
-```bash
-cargo run --example export_hard_real_oracle_inputs -- fixtures/hard_real_2026_oracle_inputs.csv
-Rscript fixtures/r/generate_identical_input_oracles.R fixtures/hard_real_2026_oracle_inputs.csv fixtures/hard_real_2026_identical_input_oracles.csv
-```
-
-The oracle contains `expected_normal`, `expected_normal_log`, and
-`expected_stored_log`. The normal fit computes logs inside R from the decoded
-normal inputs; the stored-log fit uses the decoded log columns directly. The
-legacy normal-wrapper check still compares against its original fixture. A
-separate identical-input normal check uses the new oracle with a relative-error
-limit of `5e-11`.
-
-The original log-oracle values and `hard_real_2026_worst10_baseline.csv` are
-regression anchors. The ten-case test compares against those original values,
-with each error limited to one tenth of its frozen baseline. Regenerating the
-separate oracle does not change those anchors. R version and build differences
-can still affect numerical results even with identical input bytes; snapshot
-metadata records the oracle version, platform, and input digest.
-
-## Measured per-case precision gains
-
-The following log-API results compare 0.1.5 against 0.1.4 on the ten predictions
-with the largest original error. Both versions are compared against the same
-original log-oracle values. Gains are the original absolute error divided by
-the current absolute error, rounded to two decimal places.
-
-| Case / prediction | Current absolute log error | Error reduction |
+| Dataset | Committed queries | Maximum allowed absolute log error |
 | --- | ---: | ---: |
-| `testis_full/range_01` | `6.7779e-14` | 292.69× |
-| `testis_full/range_02` | `3.2252e-14` | 221.85× |
-| `testis_full/range_11` | `0` | Exact oracle match |
-| `testis_full/hard_00` | `1.1902e-13` | 39.04× |
-| `testis_full/hard_01` | `1.1546e-13` | 39.17× |
-| `testis_full/hard_02` | `1.1369e-13` | 39.61× |
-| `testis_full/hard_03` | `1.0836e-13` | 39.16× |
-| `testis_full/hard_04` | `1.0658e-13` | 39.78× |
-| `testis_full/hard_05` | `1.0658e-13` | 39.58× |
-| `testis_full/hard_06` | `1.0658e-13` | 39.50× |
+| `airway_512` | 44 | `1e-11` |
+| `airway_full` | 44 | `3e-13` |
+| `simulated_600` | 45 | `9e-13` |
 
-Across the entire 72-prediction hard-real set, maximum absolute log error is
-`1.9645e-11` at `blood_full/range_03`. The legacy public-wrapper check against
-its original stored-log-derived oracle also passes, with maximum relative error
-`1.6101e-8`; its inputs include formatting and log-transformation differences.
-The separate identical-input normal comparison reaches `1.3053e-11`.
+These ceilings round the measured 0.2.0 committed-query maxima upward with a
+small margin for platform rounding. They prevent regressions that could still
+pass the historical tenfold gate. Both checks share one evaluation of each
+dataset through each API.
 
-## DESeq2 R 4.6.1 holdout
+`examples/precision.rs` reports errors for the committed fixture by default,
+or for a fixture supplied as its only argument. The committed baseline is a
+permanent regression reference. Range queries remain part of the overall
+maximum even when their baseline error is zero.
 
-`deseq2_r461_local_trend.csv` was generated with R 4.6.1, DESeq2 1.52.0, and
-`locfit` 1.5-9.12. The generator calls `makeExampleDESeqDataSet` with 1,200 genes,
-12 samples, `betaSD=1`, and seed 461, then runs `DESeq(fitType="local")`. The
-1,198 usable gene rows contain binary encodings of means, gene-wise dispersion
-estimates, precomputed logs, and expected log fitted dispersions.
+## Test organization
+
+- Unit tests live beside the numerical code.
+- `tests/api.rs` groups public API checks into `local_regression`, `deseq2`, and
+  `validation` modules under `tests/api/`, compiled as one integration target.
+- `tests/fixtures.rs` checks fixture integrity, both hard-case precision gates,
+  and synthetic shape parity; `tests/support/` shares fixture loading and
+  evaluation with the reporting example.
+- Rust documentation examples run as doctests.
+
+Run `cargo test --locked --test api` for API checks or
+`cargo test --locked --test fixtures` for numerical reference checks. The full
+debug and release suites run in CI on Linux and macOS with stable Rust and
+Rust 1.85.0; formatting, Clippy, documentation, and packaging checks run once
+on Linux stable. Publishing depends on all four test jobs succeeding.
+
+## Numerical implementation
+
+The local fitter preserves observation order even when predictors repeat,
+reuses the reciprocal bandwidth, and groups diagonal normalization factors.
+The centered global fit enforces its zero first-moment invariant. These are
+uniform numerical rules, with no sample-count or fixture-specific dispatch.
+
+## Verified 0.2.0 results
+
+The strict committed test passes for all 96 hard queries through both APIs;
+minimum individual error reduction is 16.048×. The maximum over all 133 queries
+also improves more than tenfold in every case.
+
+A broader native-R verification evaluates every usable gene from the same
+actual DESeq2 runs, including predictions outside the committed query list:
 
 ```bash
-Rscript fixtures/r/generate_deseq2_r461_fixture.R
-cargo test --locked --test fixtures real_deseq2_r461_local_trend_parity
+Rscript fixtures/r/generate_deseq2_r462_hard_fixtures.R target/all_gene_r462.csv --all-queries
+cargo run --release --example precision -- target/all_gene_r462.csv
 ```
 
-The test checks both the normal-input and stored-log APIs at an absolute
-log-error limit of `2e-11`. It validates the local trend on simulated counts
-through the actual DESeq2 package; it does not validate every DESeq2 output.
+| Dataset | Predictions | Before max log error | After max log error | Reduction |
+| --- | ---: | ---: | ---: | ---: |
+| `airway_full` | 22,369 | `4.283629007062473e-12` | `2.647326802218686e-13` | 16.18× |
+| `airway_512` | 512 | `1.112738101660682e-8` | `1.670130700404115e-11` | 666.26× |
+| `simulated_600` | 599 | `2.386317810021410e-10` | `8.313350008393172e-13` | 287.05× |
+
+The selected-query airway-subset maximum is smaller (`9.8703e-12`); the table
+reports the broader all-gene maximum. The native runtime is R 4.6.2; the locfit
+binary's original build metadata is recorded separately for reproducibility.

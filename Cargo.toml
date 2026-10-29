@@ -1,8 +1,8 @@
 [package]
 name = "rcompat-locfit"
-version = "0.1.5"
-edition = "2021"
-rust-version = "1.70"
+version = "0.2.0"
+edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "R locfit-compatible local regression in Rust, focused on DESeq2 dispersion trend fitting."
 repository = "https://github.com/deminden/rcompat-locfit"
@@ -12,7 +12,6 @@ keywords = ["locfit", "deseq2", "local-regression", "bioinformatics"]
 categories = ["algorithms", "science"]
 exclude = [
     ".github/**",
-    "data/**",
 ]
 
 [lib]

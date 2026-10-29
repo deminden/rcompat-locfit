@@ -1,22 +1,24 @@
 # Changelog
 
-## 0.1.5 — 2026-10-14
+## 0.2.0 — 2026-10-29
 
-Improves DESeq2 local dispersion trend precision while retaining the existing
-public API and original parity bounds.
+- Use R 4.6.2 as the sole numerical oracle and remove obsolete reference
+  tables, generators, hardcoded legacy values, and missing-data diagnostics.
+- Adopt Rust 2024, requiring Rust 1.85 or newer.
+- Preserve input-order reductions for repeated predictors, reuse reciprocal
+  bandwidths, group local covariance normalization, and enforce centered
+  global first moments. Remove sample-count-specific arithmetic dispatch and
+  residual-based selection between competing solves.
+- Improve all 96 fixed difficult DESeq2 predictions by at least 16.048× through
+  both APIs. Maximum errors over all 23,480 usable gene predictions improve
+  16.18× on the full airway dataset, 666.26× on its 512-gene subset, and 287.05×
+  on the seed-462 simulation.
+- Add self-contained binary64 fixtures, an immutable before-change baseline,
+  strict precision regressions, and the `precision` reporting example.
+- Protect current precision with dataset-specific absolute log-error ceilings
+  alongside the frozen-baseline improvement checks, using the same evaluations.
+- Group public API tests by regression behavior, DESeq2 behavior, and input
+  validation in one integration target. Run debug and release tests on Linux
+  and macOS with stable Rust and the minimum Rust 1.85.0 in CI.
 
-- Build the Hermite evaluation grid by adaptive subdivision using predictor
-  geometry and nearest-neighbor bandwidths instead of sample-count templates.
-- Accumulate one shared cubic covariance moment and select between equivalent
-  quadratic solves using the smaller relative equation residual.
-- Add exact binary-input transport for R oracles, with separate normal-input
-  and stored-log expectations and a bit-identity regression check.
-- Reduce log error on ten difficult predictions: seven improve by
-  39.04–39.78×, two by 292.69× and 221.85×, and one matches the oracle exactly.
-  Maximum absolute log error on these cases is `1.1902e-13`.
-- Add a reproducible actual DESeq2 local-fit holdout on seeded simulated counts.
-  Maximum log error over 1,198 usable genes falls from `2.39e-2` to `1.67e-11`.
-
-Maximum absolute log error across all 72 hard-real predictions is `1.9645e-11`.
-Measurements use macOS arm64; the fixture guide records oracle provenance and
-per-case results.
+The public Rust API is unchanged. R is required only to regenerate references.

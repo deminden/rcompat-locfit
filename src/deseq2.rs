@@ -2,10 +2,10 @@ use crate::{LocalFit, LocalRegressionConfig, LocfitError, PredictionMethod};
 
 /// DESeq2-oriented local dispersion trend.
 ///
-/// Inputs and outputs are normal-scale means and dispersions. Internally, the
-/// local fit is performed on `ln(mean)` and `ln(dispersion)`, with normal-scale
-/// means used as prior weights. Points with `dispersion < min_disp * 10` are
-/// excluded from the local regression.
+/// Supports normal-scale and precomputed natural-log inputs, with normal-scale
+/// or log-scale predictions. The local fit uses `ln(mean)` and `ln(dispersion)`,
+/// with normal-scale means as prior weights. Points with
+/// `dispersion < min_disp * 10` are excluded from the local regression.
 #[derive(Clone, Debug)]
 pub struct Deseq2LocalDispersionTrend {
     kind: TrendKind,

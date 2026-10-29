@@ -1,55 +1,43 @@
 # rcompat-locfit
 
-`rcompat-locfit` is a pure Rust crate for selected R `locfit`-compatible
-one-dimensional local regression. Its main target is the local dispersion
-trend used by DESeq2-style workflows.
+**Version 0.2.0** — pure Rust one-dimensional local regression for the local dispersion trend used
+by DESeq2. This clean-room implementation uses **R 4.6.2** as its numerical
+reference. It has no R runtime dependency and contains no code copied or
+translated from locfit or DESeq2.
 
-This is a clean-room implementation. It does not call R at runtime and contains
-no code copied or translated from R `locfit`, DESeq2, or other copyleft projects.
-R is used only as a black-box numeric oracle during development.
+Build with **Rust 1.85 or newer**, using the **Rust 2024 edition**.
 
-Version **0.1.5** improves evaluation-grid construction and quadratic fitting
-without changing the public API. See [the changelog](CHANGELOG.md) for details.
-Broader exact `locfit` parity remains work in progress, including ties,
-singular local designs, and behavior across R builds and control settings.
+## Behavior
 
-## Scope
+- Local polynomial degrees 0, 1, and 2, tricube kernels, nearest-neighbor
+  bandwidths, and prior weights.
+- Adaptive evaluation grids with cubic Hermite interpolation and quadratic
+  boundary extrapolation.
+- DESeq2 fitting of `log(dispersion)` against `log(mean)`, weighted by the
+  original means, with the `min_disp * 10` fitting filter.
+- Normal-input and precomputed-log APIs, with normal and log predictions.
 
-- Local polynomial regression in one predictor, with degrees 0, 1, and 2.
-- Tricube kernels, nearest-neighbor bandwidths, and prior weights.
-- Direct fitted values and slopes, plus an adaptive evaluation grid with cubic
-  Hermite interpolation and weighted-quadratic boundary extrapolation.
-- A DESeq2-oriented wrapper that fits `log(dispersion)` against `log(mean)`,
-  uses normal-scale means as prior weights, and excludes dispersions below
-  `min_disp * 10`.
-- Normal-scale predictions and a log-column constructor with log-dispersion
-  predictions for callers that already have precomputed natural logs.
-
-This crate implements selected behavior rather than the full R `locfit` API.
+The crate implements selected locfit behavior; broader compatibility remains
+work in progress.
 
 ## Current precision
 
-Measured maximum errors for version **0.1.5** on macOS arm64:
+Maximum absolute log-dispersion errors across all **23,480 usable gene
+predictions**, measured through both input APIs against actual DESeq2 1.52.0
+local fits under R 4.6.2 and locfit 1.5-9.12 on macOS arm64:
 
-| Validation set | Error measure | Maximum error |
-| --- | --- | ---: |
-| Synthetic `locfit` matrix | Relative dispersion error | `1.8970e-13` |
-| Curated real DESeq2-derived subset | Relative dispersion error | `1.3319e-13` |
-| Hard-real subset, stored-log API: 72 predictions | Absolute log-dispersion error | `1.9645e-11` |
-| Hard-real subset, normal API with identical oracle inputs | Relative dispersion error | `1.3053e-11` |
-| Actual DESeq2 local fit: 1,198 gene predictions | Absolute log-dispersion error | `1.6741e-11` |
+| Dataset | Gene predictions | Maximum absolute log error |
+| --- | ---: | ---: |
+| Real airway counts | 22,369 | `2.6473e-13` |
+| Airway subset | 512 | `1.6701e-11` |
+| Seeded simulated counts | 599 | `8.3134e-13` |
 
-The quadratic-fitting improvements achieved **39.04–39.78× lower log error**
-on seven difficult predictions, **292.69×** and **221.85×** on two others,
-and an exact oracle match on a tenth. Maximum absolute log error across these
-ten predictions is **`1.1902e-13`**. The table reports accuracy across the full
-validation sets.
+Each entry reports the larger maximum from the two input APIs. Self-contained
+regression tests check **133 fixed queries**, including **96 hard predictions**,
+through both APIs with dataset-specific absolute error limits.
 
-The DESeq2 comparison uses R 4.6.1, DESeq2 1.52.0, and `locfit` 1.5-9.12,
-running `DESeq(fitType="local")` on seeded simulated counts with 1,200 genes
-and 12 samples. These measurements validate the local dispersion trend.
-[The fixture guide](fixtures/README.md) documents oracle provenance and the
-per-case gains.
+All reference values use binary64 transport. These measurements concern the
+local dispersion trend, not every output of the DESeq2 pipeline.
 
 ## Usage
 
@@ -79,18 +67,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Validation
 
-Run the self-contained checks without R:
-
 ```bash
 cargo test --locked
 cargo test --locked --release
+cargo run --release --example precision
 ```
 
-Tests cover synthetic edge cases, real-derived subsets, exact input transport,
-precision regressions, and the DESeq2 local-fit comparison.
+Default tests are self-contained and require no R installation or external
+private data. See [the fixture guide](fixtures/README.md) for reference
+provenance, regeneration commands, and the fixed-query benchmark.
 
-R is needed only to regenerate fixtures. See [the fixture guide](fixtures/README.md)
-for commands, input formats, and dataset details.
+Tests separate numerical unit checks, public API behavior and validation, R
+reference regressions, and documentation examples. CI runs debug and release
+tests on Linux and macOS with both stable Rust and the minimum Rust 1.85.0.
 
 ## License
 

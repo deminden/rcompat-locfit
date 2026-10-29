@@ -1,62 +1,29 @@
 suppressPackageStartupMessages(library(locfit))
-
-out_path <- file.path("fixtures", "locfit_deseq2_cases.csv")
+stopifnot(getRversion() == "4.6.2")
+args <- commandArgs(trailingOnly = TRUE)
+out_path <- if (length(args)) args[[1L]] else "fixtures/locfit_r462_cases.csv"
 min_disp_default <- 1e-8
-
+hex <- function(x) paste(sprintf("%02x", as.integer(writeBin(as.double(x), raw(), size=8L, endian="little"))), collapse="")
 write_header <- function(con) {
-  writeLines("# generated_by=fixtures/r/generate_locfit_fixtures.R", con)
-  writeLines(paste0("# r_version=", paste(R.version$major, R.version$minor, sep = ".")), con)
-  writeLines(paste0("# locfit_version=", as.character(packageVersion("locfit"))), con)
-  writeLines("# columns:case,kind,index,mean,disp,expected", con)
+  writeLines(c("# generated_by=fixtures/r/generate_locfit_r462_fixtures.R",
+    paste0("# r_version=", getRversion()), paste0("# locfit_version=", packageVersion("locfit")),
+    "# input_encoding=IEEE754_binary64_little_endian_hex",
+    "case,kind,gene,mean_bits,disp_bits,log_mean_bits,log_disp_bits,expected_log_bits"),con)
 }
-
-compute_expected <- function(means, disps, pred_means, min_disp) {
-  keep <- is.finite(means) &
-    is.finite(disps) &
-    means > 0 &
-    disps > 0 &
-    disps >= min_disp * 10
-
-  if (!any(keep)) {
-    return(rep(min_disp, length(pred_means)))
-  }
-
-  d <- data.frame(
-    logDisps = log(disps[keep]),
-    logMeans = log(means[keep])
-  )
-
-  fit <- locfit(
-    logDisps ~ lp(logMeans, nn = 0.7, deg = 2),
-    data = d,
-    weights = means[keep]
-  )
-
-  as.numeric(exp(predict(fit, newdata = data.frame(logMeans = log(pred_means)))))
+write_case <- function(con, name, means, disps, pred_means, min_disp=min_disp_default) {
+  keep <- disps >= min_disp*10
+  stopifnot(any(keep))
+  x <- log(means[keep]); y <- log(disps[keep]); w <- means[keep]
+  fit <- locfit(y ~ lp(x,nn=.7,deg=2), weights=w)
+  expected <- as.numeric(predict(fit,newdata=log(pred_means)))
+  for(i in seq_along(means)) writeLines(paste(c(name,"input",paste0("input_",i),hex(means[i]),hex(disps[i]),hex(log(means[i])),hex(log(disps[i])),""),collapse=","),con)
+  for(i in seq_along(pred_means)) writeLines(paste(c(name,"predict",paste0("query_",i),hex(pred_means[i]),"",hex(log(pred_means[i])),"",hex(expected[i])),collapse=","),con)
 }
-
-write_case <- function(con, name, means, disps, pred_means, min_disp = min_disp_default) {
-  for (i in seq_along(means)) {
-    writeLines(
-      sprintf("%s,input,%d,%.17g,%.17g,", name, i - 1L, means[[i]], disps[[i]]),
-      con
-    )
-  }
-
-  expected <- compute_expected(means, disps, pred_means, min_disp)
-  for (i in seq_along(pred_means)) {
-    writeLines(
-      sprintf("%s,predict,%d,%.17g,,%.17g", name, i - 1L, pred_means[[i]], expected[[i]]),
-      con
-    )
-  }
-}
-
 set.seed(1)
 dir.create(dirname(out_path), recursive = TRUE, showWarnings = FALSE)
 
 con <- file(out_path, open = "w")
-on.exit(close(con), add = TRUE)
+
 
 write_header(con)
 
@@ -158,12 +125,5 @@ write_case(
   c(10, 50, 200, 1000)
 )
 
-means <- c(1, 2, 5, 10, 50, 100)
-disps <- c(1e-9, 2e-9, 3e-9, 4e-9, 5e-9, 8e-9)
-write_case(
-  con,
-  "constant_min_disp",
-  means,
-  disps,
-  c(1, 10, 100, 1000)
-)
+
+close(con)

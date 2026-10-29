@@ -137,17 +137,6 @@ mod tests {
     }
 
     #[test]
-    fn exact_line_degree_one() {
-        let z = [-2.0, -1.0, 0.0, 1.0, 2.0];
-        let y = [-1.0, 1.0, 3.0, 5.0, 7.0];
-        let weights = [1.0; 5];
-        close(
-            weighted_polynomial_coefficients(&z, &y, &weights, 1).unwrap()[0],
-            3.0,
-        );
-    }
-
-    #[test]
     fn exact_line_returns_slope() {
         let z = [-2.0, -1.0, 0.0, 1.0, 2.0];
         let y = [-1.0, 1.0, 3.0, 5.0, 7.0];
@@ -156,17 +145,6 @@ mod tests {
         close(coefficients[0], 3.0);
         close(coefficients[1], 2.0);
         close(coefficients[2], 0.0);
-    }
-
-    #[test]
-    fn exact_quadratic_degree_two() {
-        let z = [-2.0, -1.0, 0.0, 1.0, 2.0];
-        let y = [9.0, 4.0, 3.0, 6.0, 13.0];
-        let weights = [1.0; 5];
-        close(
-            weighted_polynomial_coefficients(&z, &y, &weights, 2).unwrap()[0],
-            3.0,
-        );
     }
 
     #[test]

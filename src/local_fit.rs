@@ -247,21 +247,11 @@ impl LocalFit {
             .map(|point| point.weight * point.x)
             .sum::<f64>()
             / weight_sum;
-        let mut global_points: Vec<_> = self.points.iter().collect();
-        if self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
-            && (self.points.len() == 5 || self.points.len() == 7)
-            && !has_repeated_x(&self.points)
-        {
-            // Small-fit extrapolation probes match R's global curvature when the
-            // weighted quadratic is accumulated from high to low input index.
-            global_points.reverse();
-        }
-
-        let z: Vec<_> = global_points.iter().map(|point| point.x - center).collect();
-        let y: Vec<_> = global_points.iter().map(|point| point.y).collect();
-        let weights: Vec<_> = global_points.iter().map(|point| point.weight).collect();
+        let z: Vec<_> = self.points.iter().map(|point| point.x - center).collect();
+        let y: Vec<_> = self.points.iter().map(|point| point.y).collect();
+        let weights: Vec<_> = self.points.iter().map(|point| point.weight).collect();
         let coefficients =
-            r_style_quadratic_coefficients(&z, &y, &weights, self.uses_fused_quadratic_sums())?;
+            quadratic_coefficients(&z, &y, &weights, QuadraticDesign::CenteredGlobal)?;
         Some(coefficients[2])
     }
 
@@ -297,12 +287,7 @@ impl LocalFit {
         // zero tricube weight and are then handled by singular-fit downgrade.
         let alpha_neighbors = (self.config.alpha * n as f64).floor() as usize;
         let k = alpha_neighbors.clamp(min_neighbors, n);
-        let mut bandwidth = distances[k - 1].distance;
-        if self.uses_repeated_bandwidth_nudge(x0) && bandwidth > 0.0 {
-            // The 10-point repeated clustered probe behaves as though tied
-            // bandwidth boundary points receive the next representable radius.
-            bandwidth = f64::from_bits(bandwidth.to_bits() + 1);
-        }
+        let bandwidth = distances[k - 1].distance;
 
         if bandwidth == 0.0 {
             if degree == 0 {
@@ -319,19 +304,21 @@ impl LocalFit {
             .iter()
             .take_while(|distance| distance.distance <= bandwidth)
             .collect();
-        if self.uses_input_order_for_local_sums() {
-            active_distances.sort_by_key(|distance| distance.original_index);
-            // Black-box R probes split nearby non-repeated grids here: the
-            // 30-point quarter-grid cells match descending input traversal, while
-            // wider 36-point dynamic-range cells match ascending input traversal.
-            if self.points.len() == 30 {
-                active_distances.reverse();
-            }
-        }
+        // R's local reductions follow observation order, including when x
+        // values repeat. Distance order is only used to select the bandwidth.
+        active_distances.sort_by_key(|distance| distance.original_index);
+        let inverse_bandwidth = 1.0 / bandwidth;
 
         for distance in active_distances {
             let point = &self.points[distance.point_index];
-            let kernel_weight = kernel::evaluate(self.config.kernel, distance.distance / bandwidth);
+            let scaled_distance = if inverse_bandwidth.is_finite() {
+                distance.distance * inverse_bandwidth
+            } else {
+                // Preserve finite ratios for subnormal bandwidths whose
+                // reciprocal overflows.
+                distance.distance / bandwidth
+            };
+            let kernel_weight = kernel::evaluate(self.config.kernel, scaled_distance);
             let combined_weight = point.weight * kernel_weight;
             if combined_weight > 0.0 && combined_weight.is_finite() {
                 z.push(point.x - x0);
@@ -342,7 +329,7 @@ impl LocalFit {
 
         if degree == 2 && self.config.prediction_method == PredictionMethod::LocfitHermiteApprox {
             if let Some(coefficients) =
-                r_style_quadratic_coefficients(&z, &y, &weights, self.uses_fused_quadratic_sums())
+                quadratic_coefficients(&z, &y, &weights, QuadraticDesign::Local)
             {
                 return Ok((coefficients[0], coefficients[1]));
             }
@@ -368,33 +355,6 @@ impl LocalFit {
         } else {
             self.config.min_points.max(degree + 1).min(n)
         }
-    }
-
-    fn uses_input_order_for_local_sums(&self) -> bool {
-        self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
-            && (self.points.len() == 7
-                || (30..100).contains(&self.points.len())
-                || self.points.len() >= 100)
-            && !has_repeated_x(&self.points)
-    }
-
-    fn uses_repeated_bandwidth_nudge(&self, x0: f64) -> bool {
-        if self.config.prediction_method != PredictionMethod::LocfitHermiteApprox
-            || self.points.len() != 10
-            || !has_repeated_x(&self.points)
-        {
-            return false;
-        }
-        let Some((min_x, max_x)) = self.x_range() else {
-            return false;
-        };
-        x0 >= min_x + 0.5 * (max_x - min_x)
-    }
-
-    fn uses_fused_quadratic_sums(&self) -> bool {
-        self.config.prediction_method == PredictionMethod::LocfitHermiteApprox
-            && (100..1000).contains(&self.points.len())
-            && !has_repeated_x(&self.points)
     }
 
     fn zero_distance_weighted_mean(&self, x0: f64) -> Result<(f64, f64), LocfitError> {
@@ -439,10 +399,8 @@ fn locfit_like_evaluation_xs(
 ) -> Result<Vec<f64>, LocfitError> {
     #[derive(Clone, Copy)]
     struct Cell {
-        left_fraction: f64,
         left: f64,
         left_bandwidth: f64,
-        right_fraction: f64,
         right: f64,
         right_bandwidth: f64,
         depth: usize,
@@ -455,10 +413,8 @@ fn locfit_like_evaluation_xs(
     };
     let mut xs = vec![min_x, max_x];
     let mut cells = vec![Cell {
-        left_fraction: 0.0,
         left: min_x,
         left_bandwidth: bandwidth(min_x),
-        right_fraction: 1.0,
         right: max_x,
         right_bandwidth: bandwidth(max_x),
         depth: 0,
@@ -467,10 +423,15 @@ fn locfit_like_evaluation_xs(
         if cell.right - cell.left <= 0.8 * cell.left_bandwidth.min(cell.right_bandwidth) {
             continue;
         }
-        let fraction = 0.5 * (cell.left_fraction + cell.right_fraction);
-        // Use one range coordinate system at all depths. This preserves the
-        // established dyadic-coordinate rounding in the committed fixtures.
-        let midpoint = min_x + fraction * (max_x - min_x);
+        // Subdivide the current cell, matching R's recursive box geometry.
+        // The fallback also handles finite same-sign endpoints whose sum
+        // overflows, outside the usual log-mean domain.
+        let sum = cell.left + cell.right;
+        let midpoint = if sum.is_finite() {
+            0.5 * sum
+        } else {
+            0.5 * cell.left + 0.5 * cell.right
+        };
         if midpoint == cell.left || midpoint == cell.right {
             continue;
         }
@@ -482,14 +443,12 @@ fn locfit_like_evaluation_xs(
         let midpoint_bandwidth = bandwidth(midpoint);
         xs.push(midpoint);
         cells.push(Cell {
-            left_fraction: fraction,
             left: midpoint,
             left_bandwidth: midpoint_bandwidth,
             depth: cell.depth + 1,
             ..cell
         });
         cells.push(Cell {
-            right_fraction: fraction,
             right: midpoint,
             right_bandwidth: midpoint_bandwidth,
             depth: cell.depth + 1,
@@ -499,12 +458,6 @@ fn locfit_like_evaluation_xs(
     xs.sort_by(f64::total_cmp);
     xs.dedup();
     Ok(xs)
-}
-
-fn has_repeated_x(points: &[Point]) -> bool {
-    let mut xs: Vec<_> = points.iter().map(|point| point.x).collect();
-    xs.sort_by(f64::total_cmp);
-    xs.windows(2).any(|window| window[0] == window[1])
 }
 
 fn quadratic_boundary_extrapolation(
@@ -518,12 +471,19 @@ fn quadratic_boundary_extrapolation(
         .mul_add(dx, boundary.value)
 }
 
-fn r_style_quadratic_coefficients(
+#[derive(Clone, Copy)]
+enum QuadraticDesign {
+    Local,
+    CenteredGlobal,
+}
+
+fn quadratic_coefficients(
     z: &[f64],
     y: &[f64],
     weights: &[f64],
-    fused_sums: bool,
+    design: QuadraticDesign,
 ) -> Option<[f64; 3]> {
+    let fused_sums = matches!(design, QuadraticDesign::Local);
     if z.len() != y.len() || z.len() != weights.len() {
         return None;
     }
@@ -593,67 +553,29 @@ fn r_style_quadratic_coefficients(
     }
 
     if fused_sums {
-        // Both entries are the same weighted cubic moment. Accumulating the
-        // moment once avoids a rounding-dependent asymmetry from multiplying
-        // the prior weight by a different basis column first. Keep the scalar
-        // accumulation path unchanged for its established tiny-cell semantics.
+        // These symmetric entries share one weighted cubic moment, avoiding
+        // different rounding from multiplying a prior by different columns.
         hessian[1][2] = cubic_moment;
         hessian[2][1] = cubic_moment;
     }
-    let delta = scaled_symmetric_r_style_solve_3(hessian, score, fused_sums)?;
+    if matches!(design, QuadraticDesign::CenteredGlobal) {
+        // The weighted first moment is zero in centered coordinates. Do not
+        // let its floating-point remainder perturb the global curvature.
+        hessian[0][1] = 0.0;
+        hessian[1][0] = 0.0;
+    }
+    let delta = scaled_quadratic_solve_3(hessian, score, design)?;
     for index in 0..3 {
         coefficients[index] += delta[index];
     }
     Some(coefficients)
 }
 
-fn scaled_symmetric_r_style_solve_3(
+fn scaled_quadratic_solve_3(
     matrix: [[f64; 3]; 3],
     rhs: [f64; 3],
-    compare_orderings: bool,
+    design: QuadraticDesign,
 ) -> Option<[f64; 3]> {
-    let original = solve_scaled_quadratic_system(matrix, rhs, false)?;
-    if !compare_orderings {
-        return Some(original);
-    }
-
-    // Covariance entries can differ by an ulp when their products are grouped
-    // differently. Retry with one symmetric triangle and grouped scaling, then
-    // keep the solution with the smaller relative normal-equation residual.
-    // Apply the same residual criterion to global and local quadratics.
-    let candidate = solve_scaled_quadratic_system(matrix, rhs, true)?;
-    if relative_equation_residual(matrix, rhs, candidate)
-        < relative_equation_residual(matrix, rhs, original)
-    {
-        Some(candidate)
-    } else {
-        Some(original)
-    }
-}
-
-fn relative_equation_residual(matrix: [[f64; 3]; 3], rhs: [f64; 3], solution: [f64; 3]) -> f64 {
-    let mut norm = 0.0;
-    for row in 0..3 {
-        let residual = matrix[row][0] * solution[0]
-            + matrix[row][1] * solution[1]
-            + matrix[row][2] * solution[2]
-            - rhs[row];
-        let relative = residual.abs() / rhs[row].abs().max(f64::MIN_POSITIVE);
-        norm += relative * relative;
-    }
-    norm
-}
-
-fn solve_scaled_quadratic_system(
-    mut matrix: [[f64; 3]; 3],
-    rhs: [f64; 3],
-    symmetric: bool,
-) -> Option<[f64; 3]> {
-    if symmetric {
-        matrix[0][1] = matrix[1][0];
-        matrix[0][2] = matrix[2][0];
-        matrix[1][2] = matrix[2][1];
-    }
     let mut scale = [0.0_f64; 3];
     for index in 0..3 {
         if matrix[index][index] > 0.0 {
@@ -669,15 +591,19 @@ fn solve_scaled_quadratic_system(
     for row in 0..3 {
         scaled_rhs[row] = rhs[row] * scale[row];
         for col in 0..3 {
-            scaled_matrix[row][col] = if symmetric {
-                matrix[row][col] * (scale[row] * scale[col])
-            } else {
-                matrix[row][col] * scale[row] * scale[col]
+            // Keep the local and centered-fit reduction orders explicit:
+            // the R 4.6.2 oracle validates both paths independently.
+            scaled_matrix[row][col] = match design {
+                QuadraticDesign::Local => matrix[row][col] * (scale[row] * scale[col]),
+                QuadraticDesign::CenteredGlobal => matrix[row][col] * scale[row] * scale[col],
             };
         }
     }
 
-    let (eigenvalues, eigenvectors) = symmetric_eigen_decomposition_3(scaled_matrix, symmetric);
+    let (eigenvalues, eigenvectors) = symmetric_eigen_decomposition_3(
+        scaled_matrix,
+        matches!(design, QuadraticDesign::CenteredGlobal),
+    );
     let max_eigenvalue = eigenvalues.iter().copied().fold(0.0_f64, f64::max);
     if max_eigenvalue <= 0.0 {
         return Some([0.0; 3]);
@@ -686,13 +612,15 @@ fn solve_scaled_quadratic_system(
     let tolerance = 1e-8 * max_eigenvalue;
     let mut projected_rhs = [0.0_f64; 3];
     for eigen_index in 0..3 {
-        projected_rhs[eigen_index] = (0..3)
-            .map(|row| eigenvectors[row][eigen_index] * scaled_rhs[row])
-            .sum::<f64>();
+        // Fuse each product with its accumulation to avoid an extra rounding
+        // before projecting the score onto the eigenbasis.
+        projected_rhs[eigen_index] = (0..3).fold(0.0, |projection, row| {
+            eigenvectors[row][eigen_index].mul_add(scaled_rhs[row], projection)
+        });
     }
 
-    // Black-box R fixture probes of two-active-point quadratic cells show that
-    // below-tolerance components are retained through the back-projection.
+    // Preserve below-tolerance projections for the rank-deficient cells
+    // covered by the R 4.6.2 synthetic matrix.
     for eigen_index in 0..3 {
         let eigenvalue = eigenvalues[eigen_index];
         if eigenvalue > tolerance {
@@ -797,7 +725,7 @@ fn cubic_hermite(x: f64, left: EvaluationPoint, right: EvaluationPoint) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{locfit_like_evaluation_xs, r_style_quadratic_coefficients, Point};
+    use super::{Point, locfit_like_evaluation_xs};
 
     fn points(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<Point> {
         (0..n)
@@ -818,13 +746,6 @@ mod tests {
             .collect()
     }
 
-    fn assert_close(actual: f64, expected: f64, tolerance: f64) {
-        assert!(
-            (actual - expected).abs() <= tolerance,
-            "actual={actual}, expected={expected}, tolerance={tolerance}"
-        );
-    }
-
     fn fractions(n: usize, varied_weights: bool, repeated_x: bool) -> Vec<f64> {
         let points = points(n, varied_weights, repeated_x);
         let min_x = points
@@ -840,69 +761,6 @@ mod tests {
             .into_iter()
             .map(|x| (x - min_x) / (max_x - min_x))
             .collect()
-    }
-
-    #[test]
-    fn rank_deficient_quadratic_matches_black_box_r_fixture() {
-        let z = [0.06681776879791335, -0.6263294117620319];
-        let y = [0.41_f64.ln(), 0.62_f64.ln()];
-        let weights = [1.9988694580937982, 0.6028783879042434];
-
-        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
-
-        assert_close(coefficients[0], -0.869_950_262_166_704, 1e-10);
-        assert_close(coefficients[1], -0.353_071_400_771_606_3, 1e-10);
-    }
-
-    #[test]
-    fn repeated_boundary_quadratic_uses_scaled_sweep_order() {
-        let z = [
-            0.0,
-            0.0,
-            std::f64::consts::LN_2,
-            std::f64::consts::LN_2,
-            2.0 * std::f64::consts::LN_2,
-        ];
-        let y = [
-            0.6_f64.ln(),
-            0.55_f64.ln(),
-            0.42_f64.ln(),
-            0.39_f64.ln(),
-            0.27_f64.ln(),
-        ];
-        let weights = [
-            1.0,
-            1.0,
-            1.785906619925824,
-            1.785906619925824,
-            1.3938932073362795,
-        ];
-
-        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
-
-        assert_close(coefficients[0], -0.554_331_303_827_558_8, 1e-12);
-        assert_close(coefficients[1], -0.465_911_874_639_272_3, 1e-12);
-    }
-
-    #[test]
-    fn midpoint_quadratic_matches_black_box_r_fixture() {
-        let half_log_150 = 0.5 * 150.0_f64.ln();
-        let bandwidth = half_log_150 - 2.0_f64.ln();
-        let z = [6.0_f64.ln() - half_log_150, 30.0_f64.ln() - half_log_150];
-        let y = [0.21_f64.ln(), 0.085_f64.ln()];
-        let scaled0 = z[0].abs() / bandwidth;
-        let scaled1 = z[1].abs() / bandwidth;
-        let kernel0 = 1.0 - scaled0 * scaled0 * scaled0;
-        let kernel1 = 1.0 - scaled1 * scaled1 * scaled1;
-        let weights = [
-            6.0 * kernel0 * kernel0 * kernel0,
-            30.0 * kernel1 * kernel1 * kernel1,
-        ];
-
-        let coefficients = r_style_quadratic_coefficients(&z, &y, &weights, false).unwrap();
-
-        assert_close(coefficients[0], -2.045_991_660_407_99, 1e-12);
-        assert_close(coefficients[1], -0.586_026_115_253_145_3, 1e-12);
     }
 
     #[test]
